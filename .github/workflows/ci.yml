@@ -64,7 +64,7 @@ jobs:
         # guess. Windows is covered once because that is where this project is
         # developed; Windows runners bill at twice the rate of Linux ones.
         os: [ubuntu-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
         include:
           - os: windows-latest
             python-version: "3.12"

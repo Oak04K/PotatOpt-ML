@@ -13,6 +13,16 @@ only *what* changed makes the same mistake easy to reintroduce.
 
 ## [1.6.1] - 2026-08-30
 
+### Removed
+
+- **Python 3.10 is no longer supported; the floor is 3.11.** It was the only
+  job left failing after the pandas 3 fix, on a resolver combination none of the
+  other four versions produce. Claiming support for a version whose CI job is
+  red is worse than not claiming it, and the classifier list, `requires-python`
+  and the CI matrix are held equal by a test - so the claim had to move rather
+  than be quietly ignored. `ruff`'s target moves to `py311` with it, which
+  brings `datetime.UTC` into range.
+
 ### Fixed
 
 - **`fit()` failed on any frame containing text, on pandas 3.0.** pandas 3.0

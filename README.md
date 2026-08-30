@@ -3,7 +3,7 @@
 **Predictive maintenance that runs on a potato.**
 
 [![CI](https://github.com/Oak04K/PotatOpt-ML/actions/workflows/ci.yml/badge.svg)](https://github.com/Oak04K/PotatOpt-ML/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://www.python.org/)
 [![Version](https://img.shields.io/badge/version-1.6.1-blue.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Core install](https://img.shields.io/badge/core%20install-4%20packages-orange.svg)](#why-it-is-built-this-way)
@@ -387,7 +387,7 @@ python -m ruff check potatopt chart_engine.py tests benchmarks scripts examples
 python -m pytest tests -q
 ```
 
-CI runs the suite on Python 3.10 through 3.14 and on Windows, verifies the
+CI runs the suite on Python 3.11 through 3.14 and on Windows, verifies the
 core-only install, and builds the distribution. Every Python version claimed in
 `pyproject.toml` is exercised by CI, and a test fails if those two lists ever
 disagree.

@@ -1,6 +1,6 @@
 # 🥔 PotatOpt: Industrial AI Engine for Condition-Based & Predictive Maintenance
 
-[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://www.python.org/)
+[![Python Version](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://www.python.org/)
 [![Version](https://img.shields.io/badge/version-1.6.0-blue.svg)](#)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Architecture](https://img.shields.io/badge/Architecture-LowSpecML%20%2F%20Zero--Leakage-orange.svg)]()

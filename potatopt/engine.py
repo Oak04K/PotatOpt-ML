@@ -5,7 +5,10 @@ import hashlib  # SHA-256 model-file hashing (save/load) + SHA-1 threshold-tunin
 import json  # metadata sidecar file (save/load) and NaN/Infinity-safe serialization (to_jsonable)
 import os  # path handling in save()/load() (abspath, dirname, makedirs, splitext)
 import re  # column-name sanitizing + ID-like column detection (drop_id_like_columns)
-from datetime import datetime, timezone  # UTC timestamps written into save() metadata
+from datetime import (  # UTC timestamps written into save() metadata
+    UTC,
+    datetime,
+)
 from typing import Any  # loose return-type annotations for JSON-shaped dicts
 
 # Core numerical / dataframe stack - the four packages that make up the "core install"
@@ -848,7 +851,7 @@ class PotatOptEngine(BaseEstimator):
 
         # Freeze a compact statistical fingerprint of the training data so drift
         # can still be measured after deployment, when the training set is gone.
-        self.train_timestamp = datetime.now(timezone.utc).isoformat()
+        self.train_timestamp = datetime.now(UTC).isoformat()
         self.train_data_hash = self._hash_training_data(X_train, y_train)
         self.train_profile = {}
         for col in self.numeric_cols:
@@ -1889,7 +1892,7 @@ class PotatOptEngine(BaseEstimator):
             "best_estimator": "IsolationForest" if self.is_anomaly_model else getattr(self.model, "best_estimator", "Unknown"),
             "features_used": self.feature_names,
             "potatopt_version": _package_version(),
-            "saved_at_utc": datetime.now(timezone.utc).isoformat(),
+            "saved_at_utc": datetime.now(UTC).isoformat(),
             "trained_at_utc": self.train_timestamp,
             "train_data_sha256": self.train_data_hash,
             "n_train_rows": int(self.train_rows),

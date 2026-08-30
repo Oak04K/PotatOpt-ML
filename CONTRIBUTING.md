@@ -14,7 +14,7 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -e ".[automl,xai,viz,app,mcp,dev]"   # the same set CI installs
 ```
 
-Python 3.10 – 3.14. Every version listed in `pyproject.toml` is exercised by CI, and
+Python 3.11 – 3.14. Every version listed in `pyproject.toml` is exercised by CI, and
 nothing is claimed that CI does not run — a test enforces that those two lists stay
 identical.
 

@@ -9,7 +9,7 @@ readme = "README.md"
 # Every version listed here is exercised by the CI matrix in
 # .github/workflows/ci.yml, and nothing is claimed that CI does not run.
 # 3.9 was dropped: it reached end of life in October 2025 and was never tested.
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "Oak04K" }]
 keywords = [
@@ -29,7 +29,6 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -90,7 +89,7 @@ markers = [
 # 0.16 series, because ruff's defaults have widened between releases and an
 # unpinned `pip install ruff` would let a new release change this project's
 # "zero errors, no warning tier" standard without anyone choosing to.
-target-version = "py310"   # the oldest version in requires-python
+target-version = "py311"   # the oldest version in requires-python
 
 [tool.ruff.lint.per-file-ignores]
 
