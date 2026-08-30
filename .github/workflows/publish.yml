@@ -1,0 +1,87 @@
+name: Publish
+
+# Publishing happens when a GitHub Release is published, never on a push.
+# A release is a deliberate act with a human behind it; a push is not, and a
+# version once on PyPI cannot be replaced - only yanked.
+on:
+  release:
+    types: [published]
+  # Lets the sdist and wheel be built and inspected without uploading anything.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build and check the distribution
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+
+      - name: Check the package metadata
+        run: python -m twine check dist/*
+
+      - name: The tag and the package version must agree
+        # The version is read from potatopt.__version__, so a release tagged
+        # v1.7.0 built from a tree that still says 1.6.0 would upload 1.6.0 and
+        # fail as a duplicate - or, worse, succeed and leave the tag pointing at
+        # a version number that is not what it published. Catch it before upload,
+        # where the mistake is still free to fix.
+        if: github.event_name == 'release'
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          BUILT=$(ls dist/*.whl | head -1 | sed -E 's/.*-([0-9][^-]*)-py3.*/\1/')
+          echo "tag=$TAG built=$BUILT"
+          if [ "$TAG" != "$BUILT" ]; then
+            echo "::error::Release tag ($TAG) does not match the built version ($BUILT). Bump potatopt.__version__ or retag."
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 14
+
+  pypi:
+    name: upload to PyPI
+    # Only a published release uploads. A manual run stops after build, so the
+    # artefact can be downloaded and inspected without spending a version number.
+    if: github.event_name == 'release'
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # Named here and on PyPI's trusted-publisher record; the two must match.
+    # An environment also allows a required reviewer to be added later, which
+    # puts a human between a tag and a permanent upload.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/potatopt
+
+    permissions:
+      # The whole point of trusted publishing: GitHub mints a short-lived OIDC
+      # token for this job and PyPI verifies it. There is no API token to store,
+      # so there is no API token to leak - which is how most package takeovers
+      # actually happen.
+      id-token: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
