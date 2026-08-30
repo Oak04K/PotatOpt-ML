@@ -4,6 +4,7 @@ drift detection and ISO 9001 traceability of PotatOpt. Numeric expectations
 and statistical behaviors were verified against the reference implementation.
 """
 
+import ast
 import json
 import logging
 import os
@@ -3301,3 +3302,126 @@ def test_quality_engineering_invalid_inputs_return_error_dicts():
         pd.DataFrame({"part": ["P1"], "operator": ["O1"], "meas": [1.0]}),
         "part", "operator", "meas"
     )
+
+
+def test_text_dtype_is_never_tested_inline():
+    """
+    Text columns must be identified through `_is_text_series`, never by comparing
+    a dtype to a literal in the module that needs the answer.
+
+    This exists because the literal test was wrong and nothing caught it.
+    `dtype == "object"` held until pandas 3.0 gave plain text the dedicated `str`
+    dtype; the comparison then answered False, so text columns were neither
+    encoded nor dropped and reached the estimator, and `fit()` died on
+    `could not convert string to float: 'M01'` for any frame carrying a machine
+    id, a shift letter or a lot code. Six sites in engine.py and one in data.py
+    held the same expression, so it had to be repaired seven times - exactly the
+    shape of bug that returns when only some copies get fixed.
+
+    Read from the AST rather than the text, so prose that has to quote the old
+    expression to explain it - this docstring included - is not mistaken for a
+    comparison that would run.
+    """
+    package_dir = Path(__file__).resolve().parent.parent / "potatopt"
+    literals = {"object", "string", "str"}
+
+    offenders = []
+    for path in sorted(package_dir.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Compare):
+                continue
+            operands = [node.left, *node.comparators]
+            names = {
+                operand.value
+                for operand in operands
+                if isinstance(operand, ast.Constant) and isinstance(operand.value, str)
+            }
+            mentions_dtype = any(
+                isinstance(operand, ast.Attribute) and operand.attr == "dtype"
+                for operand in operands
+            ) or any(
+                isinstance(operand, ast.Call)
+                and isinstance(operand.func, ast.Name)
+                and operand.func.id == "str"
+                for operand in operands
+            )
+            if mentions_dtype and names & literals:
+                offenders.append(f"{path.name}:{node.lineno}")
+
+        # select_dtypes carries the same trap by another route, and it is worse
+        # because no argument list is correct on both majors: pandas 2 raises
+        # TypeError on "str", while the ["object", "string"] that pandas 2 wants
+        # only still finds text on pandas 3 via a fallback pandas 4 removes.
+        # Text columns are chosen with _text_columns() instead.
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (isinstance(func, ast.Attribute) and func.attr == "select_dtypes"):
+                continue
+            named = {
+                element.value
+                for keyword in node.keywords
+                if isinstance(keyword.value, ast.List)
+                for element in keyword.value.elts
+                if isinstance(element, ast.Constant) and isinstance(element.value, str)
+            }
+            if named & literals:
+                offenders.append(f"{path.name}:{node.lineno} (select_dtypes)")
+
+    assert not offenders, (
+        "select text through _is_text_series() / _text_columns() rather than by "
+        "naming a dtype: " + ", ".join(offenders)
+    )
+
+
+def test_the_inline_dtype_guard_still_catches_a_real_one():
+    """The guard above is only worth having if it still fires on the real thing."""
+
+    def offends(source: str) -> bool:
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Compare):
+                continue
+            operands = [node.left, *node.comparators]
+            names = {
+                o.value for o in operands
+                if isinstance(o, ast.Constant) and isinstance(o.value, str)
+            }
+            mentions_dtype = any(
+                isinstance(o, ast.Attribute) and o.attr == "dtype" for o in operands
+            ) or any(
+                isinstance(o, ast.Call) and isinstance(o.func, ast.Name) and o.func.id == "str"
+                for o in operands
+            )
+            if mentions_dtype and names & {"object", "string", "str"}:
+                return True
+        return False
+
+    assert offends("x = series.dtype == 'object'")
+    assert offends('x = df[col].dtype == "str"')
+    assert offends("x = str(df[col].dtype) == 'string'")
+    # Prose quoting the expression must not count, which is what broke the first
+    # version of this guard: it flagged the docstring explaining the bug.
+    prose = 'def f():\n    """dtype == \'object\' was once correct."""\n    return 1\n'
+    assert not offends(prose)
+    assert not offends("x = _is_text_series(series)")
+
+
+def test_a_text_column_is_recognised_whatever_dtype_pandas_uses():
+    """
+    The behaviour the guard protects, asserted directly rather than through the
+    dtype spelling: a column of strings is text, and a number column is not,
+    on whichever pandas is installed.
+    """
+    from potatopt._utils import _is_text_series
+
+    text = pd.Series(["M01", "M02", "M03"])
+    assert _is_text_series(text), f"a string column read as {text.dtype} was not seen as text"
+
+    # The astype spellings pandas 2 and pandas 3 each prefer must both pass.
+    assert _is_text_series(text.astype("string"))
+    assert _is_text_series(text.astype(object))
+
+    assert not _is_text_series(pd.Series([1.0, 2.0, 3.0]))
+    assert not _is_text_series(pd.Series([1, 2, 3]))

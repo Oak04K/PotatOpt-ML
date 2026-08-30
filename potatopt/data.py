@@ -9,7 +9,7 @@ from sklearn.model_selection import (
 )
 
 from ._lazy import logger
-from ._utils import _is_numeric_series, to_jsonable
+from ._utils import _is_numeric_series, _is_text_series, _text_columns, to_jsonable
 from .constants import (
     DEFAULT_RANDOM_STATE,
     DQS_PRODUCTION_READY,
@@ -274,7 +274,7 @@ def detect_silent_nulls(df: pd.DataFrame) -> dict[str, Any]:
 
     try:
         report = {}
-        str_cols = dict.fromkeys(df.select_dtypes(include=["object", "string"]).columns)
+        str_cols = dict.fromkeys(_text_columns(df))
         for col in str_cols:
             series = df[col]
             if isinstance(series, pd.DataFrame):
@@ -450,7 +450,7 @@ def audit_data_quality(df: pd.DataFrame, target_col: str | None = None) -> dict[
 
         # Consistency
         mixed = 0
-        str_cols = dict.fromkeys(df.select_dtypes(include=["object", "string"]).columns)
+        str_cols = dict.fromkeys(_text_columns(df))
         for col in str_cols:
             series = df[col]
             if isinstance(series, pd.DataFrame):
@@ -522,7 +522,7 @@ def audit_data_quality(df: pd.DataFrame, target_col: str | None = None) -> dict[
             if pd.api.types.is_datetime64_any_dtype(series.dtype):
                 parsed_dt = pd.to_datetime(series, errors='coerce', utc=True)
                 time_cols.append((col, parsed_dt))
-            elif series.dtype == "object" or series.dtype == "string":
+            elif _is_text_series(series):
                 col_lower = str(col).lower()
                 if "date" in col_lower or "time" in col_lower:
                     non_null_cnt = int(series.notnull().sum())

@@ -25,6 +25,51 @@ def _is_numeric_series(series: pd.Series) -> bool:
     return bool(pd.api.types.is_numeric_dtype(series))
 
 
+def _is_text_series(series: pd.Series) -> bool:
+    """
+    True for a column of text, whichever dtype this pandas uses to hold one.
+
+    Comparing `dtype == "object"` was correct until pandas 3.0, which gives a
+    plain text column the dedicated `str` dtype instead. That comparison then
+    answers False, so the column is neither encoded nor dropped and reaches the
+    estimator as text - where it surfaces as
+    `could not convert string to float: 'M01'`, naming a cell rather than the
+    column or the cause. A machine id, a shift letter or a lot code is ordinary
+    factory data, so on pandas 3 this broke `fit()` for most real inputs while
+    every test on pandas 2 still passed.
+
+    Routed through pandas' own predicates so the answer tracks pandas instead of
+    a list of dtype spellings this module would have to keep in step by hand.
+    """
+    dtype = series.dtype
+    return bool(pd.api.types.is_object_dtype(dtype) or pd.api.types.is_string_dtype(dtype))
+
+
+def _text_columns(frame: pd.DataFrame) -> list:
+    """
+    The frame's text columns, in order, without naming a dtype.
+
+    `select_dtypes` cannot express this across both pandas majors: pandas 2
+    rejects `"str"` outright with `TypeError: numpy string dtypes are not
+    allowed`, while pandas 2's accepted `["object", "string"]` only still catches
+    text on pandas 3 through a deprecated fallback that pandas 4 removes. There
+    is no single argument list that is correct on both, so the selection goes
+    through the same predicate as every other text test here.
+
+    A duplicated column name makes `frame[col]` a DataFrame rather than a
+    Series; the first column is taken, matching how the rest of this module
+    handles that case.
+    """
+    columns = []
+    for col in dict.fromkeys(frame.columns):
+        series = frame[col]
+        if isinstance(series, pd.DataFrame):
+            series = series.iloc[:, 0]
+        if _is_text_series(series):
+            columns.append(col)
+    return columns
+
+
 def _finite_float(value: Any, name: str) -> tuple[float | None, str | None]:
     """
     Coerce a control-chart parameter to a finite float.

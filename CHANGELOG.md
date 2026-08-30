@@ -11,6 +11,40 @@ only *what* changed makes the same mistake easy to reintroduce.
 
 ---
 
+## [1.6.1] - 2026-08-30
+
+### Fixed
+
+- **`fit()` failed on any frame containing text, on pandas 3.0.** pandas 3.0
+  gives a plain text column the dedicated `str` dtype rather than `object`, and
+  seven sites across `engine.py` and `data.py` identified text by comparing
+  `dtype == "object"`. That comparison answers False under the new dtype, so a
+  text column was neither ordinal-encoded nor dropped as a high-cardinality
+  identifier: it reached the estimator as text and raised
+  `could not convert string to float: 'M01'` - a message naming a cell rather
+  than the column or the cause. A machine id, a shift letter or a lot code is
+  ordinary factory data, so this broke training for most real inputs on
+  pandas 3 while every test still passed on pandas 2.
+- The dtype test now lives in one predicate, `_is_text_series`, routed through
+  pandas' own `is_object_dtype` / `is_string_dtype` so the answer tracks pandas
+  instead of a list of dtype spellings kept in step by hand. Selecting text
+  columns goes through `_text_columns()` for the same reason: no `select_dtypes`
+  argument list is correct on both majors, because pandas 2 raises
+  `TypeError: numpy string dtypes are not allowed` on `"str"` while the
+  `["object", "string"]` it does accept only still finds text on pandas 3
+  through a fallback pandas 4 removes. Naming no dtype at all is the only
+  version-independent answer.
+- **The rule is now a test that can fail.** `test_text_dtype_is_never_tested_inline`
+  reads the package's AST and rejects any comparison of a `.dtype` against
+  `"object"`, `"string"` or `"str"`. It reads the AST rather than the text so
+  prose explaining the old bug is not mistaken for code, and it is
+  mutation-tested: restoring the comparison at a single one of the seven sites
+  makes it fail.
+
+  This was found by CI, not locally. The development machine had pandas 2.3.3
+  and every test passed there; the failure only appeared on the runners, which
+  resolve the newest release.
+
 ## [1.6.0] - 2026-08-29
 
 ### Added

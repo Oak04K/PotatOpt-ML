@@ -41,7 +41,12 @@ from sklearn.preprocessing import (  # the LowSpecML preprocessing layer fit() l
 )
 
 from ._lazy import _load_automl, _load_shap, _quiet_dependency_warnings, logger
-from ._utils import _is_numeric_series, get_library_versions, to_jsonable
+from ._utils import (
+    _is_numeric_series,
+    _is_text_series,
+    get_library_versions,
+    to_jsonable,
+)
 from .calibration import check_calibration
 from .constants import (
     CALIBRATION_DEFAULT_BINS,
@@ -292,7 +297,7 @@ class PotatOptEngine(BaseEstimator):
             if X_proc is None or not isinstance(X_proc, pd.DataFrame):
                 return (X_proc, converted)
             for col in list(X_proc.columns):
-                if X_proc[col].dtype == 'object' or str(X_proc[col].dtype) == 'string':
+                if _is_text_series(X_proc[col]):
                     series = X_proc[col]
                     if isinstance(series, pd.DataFrame):
                         continue
@@ -363,7 +368,7 @@ class PotatOptEngine(BaseEstimator):
             is_dt = False
             if pd.api.types.is_datetime64_any_dtype(X_proc[col]):
                 is_dt = True
-            elif X_proc[col].dtype == 'object' or str(X_proc[col].dtype) == 'string':
+            elif _is_text_series(X_proc[col]):
                 sample = X_proc[col].dropna().head(10)
                 if not sample.empty and sample.astype(str).str.contains(r'^\d{4}[-/]\d{2}[-/]\d{2}').all():
                     try:
@@ -385,7 +390,7 @@ class PotatOptEngine(BaseEstimator):
                 
         # 5. Automatically convert numeric strings to numeric dtype to preserve continuous sensor physics
         for col in list(X_proc.columns):
-            if X_proc[col].dtype == 'object' or str(X_proc[col].dtype) == 'string':
+            if _is_text_series(X_proc[col]):
                 num_conv = pd.to_numeric(X_proc[col], errors='coerce')
                 if num_conv.notnull().sum() > (0.8 * len(X_proc)) and num_conv.nunique() > 5:
                     X_proc[col] = num_conv
@@ -398,7 +403,7 @@ class PotatOptEngine(BaseEstimator):
             n_unique = X_proc[col].nunique()
             
             # String identifier check
-            if X_proc[col].dtype == 'object' or str(X_proc[col].dtype) == 'string':
+            if _is_text_series(X_proc[col]):
                 if (n_unique > (0.5 * n_rows) and n_rows > 30) or n_unique > 1000:
                     self.high_cardinality_cols.append(col)
             # Monotonic integer sequential ID check
@@ -424,7 +429,7 @@ class PotatOptEngine(BaseEstimator):
             self.impute_values[col] = val
             X_proc[col] = X_proc[col].fillna(val)
             
-            if X_proc[col].dtype == 'object' or str(X_proc[col].dtype) == 'string':
+            if _is_text_series(X_proc[col]):
                 self.categorical_cols.append(col)
             else:
                 self.numeric_cols.append(col)
@@ -655,7 +660,7 @@ class PotatOptEngine(BaseEstimator):
                 
         # Auto-convert string numbers to numeric
         for col in self.numeric_cols:
-            if col in X_proc.columns and (X_proc[col].dtype == 'object' or str(X_proc[col].dtype) == 'string'):
+            if col in X_proc.columns and (_is_text_series(X_proc[col])):
                 X_proc[col] = pd.to_numeric(X_proc[col], errors='coerce')
                 
         # Drop high-cardinality columns
