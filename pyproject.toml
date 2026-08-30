@@ -1,0 +1,105 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "potatopt"
+description = "Potato-optimized industrial ML for condition-based maintenance: AutoML, drift detection and cost-of-quality on CPU-only low-spec hardware."
+readme = "README.md"
+# Every version listed here is exercised by the CI matrix in
+# .github/workflows/ci.yml, and nothing is claimed that CI does not run.
+# 3.9 was dropped: it reached end of life in October 2025 and was never tested.
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Oak04K" }]
+keywords = [
+    "machine-learning",
+    "automl",
+    "predictive-maintenance",
+    "condition-monitoring",
+    "industrial-engineering",
+    "statistical-process-control",
+    "low-resource",
+    "mcp",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Manufacturing",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dynamic = ["version"]
+
+# The core install is deliberately four packages. Everything heavier is an extra,
+# and the module imports none of it until the feature is actually called.
+dependencies = [
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "scipy>=1.10.0",
+    "scikit-learn>=1.3.0",
+]
+
+[project.optional-dependencies]
+automl = ["flaml>=2.1.0", "lightgbm>=4.0.0", "xgboost>=2.0.0"]
+xai = ["shap>=0.42.0"]
+viz = ["matplotlib>=3.7.0", "seaborn>=0.12.0"]
+mcp = ["mcp>=2.1,<3"]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.16.0,<0.17",
+    "psutil>=5.9.0",
+    "tiktoken>=0.7.0",
+    "build>=1.2.0",
+    "twine>=5.0.0",
+    "httpx>=0.27",
+    "mcp>=2.1,<3",
+]
+all = [
+    "flaml>=2.1.0",
+    "lightgbm>=4.0.0",
+    "xgboost>=2.0.0",
+    "shap>=0.42.0",
+    "matplotlib>=3.7.0",
+    "seaborn>=0.12.0",
+    "mcp>=2.1,<3",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+potatopt-mcp = "potatopt.mcp_server:main"
+
+[project.urls]
+Homepage = "https://github.com/Oak04K/PotatOpt-ML"
+Repository = "https://github.com/Oak04K/PotatOpt-ML"
+
+[tool.pytest.ini_options]
+markers = [
+]
+
+[tool.ruff]
+# The rule selection is deliberately left at ruff's default. What is NOT left to
+# chance is which ruff decides that: the dev extra and the CI job both pin the
+# 0.16 series, because ruff's defaults have widened between releases and an
+# unpinned `pip install ruff` would let a new release change this project's
+# "zero errors, no warning tier" standard without anyone choosing to.
+target-version = "py310"   # the oldest version in requires-python
+
+[tool.ruff.lint.per-file-ignores]
+
+[tool.setuptools]
+# The distribution is the library and nothing else.
+packages = ["potatopt"]
+
+[tool.setuptools.package-data]
+potatopt = ["py.typed"]
+
+[tool.setuptools.dynamic]
+version = { attr = "potatopt.__version__" }

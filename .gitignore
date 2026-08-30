@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+.venv/
+venv/
+
+# Build artefacts
+build/
+dist/
+*.egg-info/
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.coverage
+
+# Editors and OS
+.vscode/
+.idea/
+.obsidian/
+.DS_Store
+Thumbs.db
+
+# Trained models and their ISO 9001 sidecars. Regenerate by re-running fit().
+*.pkl
+*.joblib
+*_metadata.json
+
+# Audit trail written by enable_audit_log()
+*.log
+
+# Process data is never committed. The AI4I cache and any plant CSV land here.
+*.csv
+*.xlsx
+*.parquet
+examples/data/
