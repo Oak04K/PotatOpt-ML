@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/Oak04K/PotatOpt-ML/actions/workflows/ci.yml/badge.svg)](https://github.com/Oak04K/PotatOpt-ML/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/version-1.6.1-blue.svg)](CHANGELOG.md)
+[![PyPI](https://img.shields.io/pypi/v/potatopt.svg)](https://pypi.org/project/potatopt/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Core install](https://img.shields.io/badge/core%20install-4%20packages-orange.svg)](#why-it-is-built-this-way)
 

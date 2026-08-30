@@ -1,7 +1,7 @@
 # 🥔 PotatOpt: Industrial AI Engine for Condition-Based & Predictive Maintenance
 
 [![Python Version](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/version-1.6.0-blue.svg)](#)
+[![PyPI](https://img.shields.io/pypi/v/potatopt.svg)](https://pypi.org/project/potatopt/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Architecture](https://img.shields.io/badge/Architecture-LowSpecML%20%2F%20Zero--Leakage-orange.svg)]()
 [![Hardware](https://img.shields.io/badge/Hardware-CPU--Friendly%20(No%20GPU%20Required)-yellow.svg)]()
@@ -27,9 +27,7 @@ python examples/quickstart.py # งาน PdM เต็มรูปแบบบ�
 ```
 
 
-**เว็บจัดโครงรอบ "เครื่องจักร" ไม่ใช่รอบ "ประเภทรายงาน"** — รหัสเครื่องทุกที่ในระบบคลิกไปที่ `/machine/{id}` ซึ่งเรียงเนื้อหาตามลำดับที่คำถามเกิดขึ้นจริง: ตอนนี้เป็นไง → จะพังไหม → ที่ผ่านมาเป็นไง → มีงานค้างอะไร
 
-> **หมายเหตุตามตรง: งานออกแบบหน้าตายังไม่จบ** รอบที่ผ่านมาแก้เฉพาะสิ่งที่*วัดได้* — จังหวะระยะห่างและขนาดตัวอักษร (พร้อมเทสต์ที่ fail ถ้ามีค่าดิบ), กริดที่เป็นสี่เหลี่ยมจริง, น้ำหนักสีที่ให้เฉพาะเครื่องที่ต้องตัดสินใจเป็นสีเต็มใบ, และเส้นทางการคลิกที่ไม่ต้องกลับไปที่เมนู — ส่วนการทำให้ **"ดูน่าใช้"** เป็นคนละงานและยังไม่ได้ทำ
 
 **แก่นที่ทำให้ต่างจาก AutoML ทั่วไป 2 ข้อ:** ทุกคำตอบแปลงเป็น**เงิน** ไม่ใช่ค่า accuracy / และ**ห้ามเงียบ** — ถ้าตรวจไม่ได้ต้องบอกว่าตรวจไม่ได้ ห้ามตอบว่า "ปกติดี"
 
@@ -1022,7 +1020,7 @@ PotatOpt ออกแบบมาเพื่อเป็นเครื่อ�
 ├── examples/             # quickstart.py + ตัวโหลดชุดข้อมูล AI4I 2020
 ├── benchmarks/           # วัด "ค่าเขียน" (token) และ "ค่ารัน" (RAM/เวลา/เงิน)
 ├── scripts/              # verify_core_install.py พิสูจน์คำเคลม Core 4 แพ็กเกจ
-├── tests/                # ชุดทดสอบอัตโนมัติ (574 เคส)
+├── tests/                # ชุดทดสอบอัตโนมัติ (422 เคส)
 ├── pyproject.toml        # Packaging + Optional Extras + การตั้งค่า ruff
 ├── requirements.txt      # Core & Ecosystem Dependencies (รวม Dev Tools)
 ├── README.md             # เอกสารฉบับภาษาอังกฤษ
@@ -1037,7 +1035,7 @@ PotatOpt ออกแบบมาเพื่อเป็นเครื่อ�
 
 ### การรันชุดทดสอบ (Running the tests)
 
-ทดสอบการทำงานของระบบทั้งหมด (574 tests) ด้วยคำสั่ง:
+ทดสอบการทำงานของระบบทั้งหมด (422 tests) ด้วยคำสั่ง:
 ```bash
 python -m pytest tests/ -q
 ```
