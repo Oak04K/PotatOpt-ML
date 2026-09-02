@@ -3148,6 +3148,228 @@ def test_capability_limits_are_length_independent_and_documented():
     assert long["stable"] is True
 
 
+def test_capability_stability_criteria_are_a_registry_with_evidence():
+    # Each criterion reports itself: the value measured, the limit it was compared
+    # against, whether it fired and why. Adding a criterion is adding an entry to
+    # the registry, not editing the body of calculate_capability() - which is how
+    # a check drifts away from the measurement that justified its limit.
+    healthy = np.random.default_rng(3).normal(100.0, 1.0, 400)
+    res = po.calculate_capability(healthy, usl=106.0, lsl=94.0)
+
+    criteria = res["stability_criteria"]
+    assert [c["name"] for c in criteria] == [
+        "sigma_ratio",
+        "outlier_rate_beyond_3_sigma",
+        "ewma_violation_rate",
+        "fitted_trend_sigmas",
+    ]
+    assert all(set(c) == {"name", "value", "limit", "fired", "reason"} for c in criteria)
+    assert res["stable"] == (not any(c["fired"] for c in criteria))
+    # A criterion that did not fire owes no explanation; one that did must give one.
+    assert all((c["reason"] is None) != c["fired"] for c in criteria)
+    # The flat field and the criterion cannot disagree - they are one number.
+    outlier = next(c for c in criteria if c["name"] == "outlier_rate_beyond_3_sigma")
+    assert outlier["value"] == res["outlier_rate_beyond_3_sigma"]
+
+    ramp = po.calculate_capability(np.linspace(10.0, 15.0, 60), usl=40.0, lsl=-20.0)
+    fired = [c for c in ramp["stability_criteria"] if c["fired"]]
+    assert fired, "a pure ramp must trip at least one criterion"
+    for criterion in fired:
+        assert criterion["reason"] in ramp["interpretation"]
+
+
+def test_capability_catches_the_slow_drift_the_old_gate_called_stable():
+    # The regression this criterion exists for. A process drifting a total of one
+    # sigma across 400 readings breaks neither of the first two limits: the moving
+    # range never widens, so sigma_ratio stays at 1.11, and no single point is
+    # extreme, so 0.75% of points sit beyond 3 sigma. The gate used to return
+    # stable=True and a Cpk of 2.02 - "capable", for a process walking away from
+    # its own mean. Only the EWMA sees it.
+    drifting = np.random.default_rng(42).normal(0.0, 1.0, 400) + np.linspace(0.0, 1.0, 400)
+    res = po.calculate_capability(drifting, usl=6.0, lsl=-6.0)
+
+    assert res["stable"] is False
+    assert res["capability_is_meaningful"] is False
+    assert res["cpk"] > 1.33, "the point is that the raw index still looks capable"
+
+    fired = [c["name"] for c in res["stability_criteria"] if c["fired"]]
+    # The two criteria that count extreme points stay blind to this shape by
+    # construction - nothing here is extreme, the whole series has moved.
+    assert "sigma_ratio" not in fired
+    assert "outlier_rate_beyond_3_sigma" not in fired
+    assert "ewma_violation_rate" in fired
+    ewma = next(c for c in res["stability_criteria"] if c["name"] == "ewma_violation_rate")
+    assert ewma["value"] > po.CAPABILITY_TREND_RATE_LIMIT
+    assert "sustained drift" in res["interpretation"]
+
+
+def test_capability_trend_criterion_is_a_rate_not_a_single_signal():
+    # The trap this project has already fallen into once: at lambda 0.1 "the chart
+    # signalled at least once" fires on 68.4% of healthy 1,000-point series, so the
+    # false-alarm rate climbs with the amount of data until it condemns everything -
+    # which is why the Western Electric set (99.5% at that length) was rejected as
+    # the stability test. This healthy series DOES produce EWMA signals; the
+    # criterion is a rate, so it survives.
+    healthy = np.random.default_rng(6).normal(100.0, 1.0, 1000)
+    res = po.calculate_capability(healthy, usl=110.0, lsl=90.0)
+
+    ewma = next(c for c in res["stability_criteria"] if c["name"] == "ewma_violation_rate")
+    assert ewma["value"] > 0.0, "this seed is chosen because the EWMA does signal here"
+    assert ewma["value"] <= po.CAPABILITY_TREND_RATE_LIMIT
+    assert ewma["fired"] is False
+    assert res["stable"] is True, res["interpretation"]
+
+
+def test_capability_catches_a_drift_the_ewma_cannot_see():
+    # The EWMA is blind to a small sustained drift at any lambda: centred on its
+    # own mean, a half-sigma drift never leaves +/-0.25 sigma while the chart's
+    # limit sits at 0.688 sigma. A fitted line is a different instrument. Here a
+    # 1-sigma drift over 200 readings trips the line and nothing else, while Cpk
+    # still reads 17.38 - world-class, for a process that is walking.
+    drifting = np.random.default_rng(1).normal(0.0, 1.0, 200) + np.linspace(0.0, 1.0, 200)
+    res = po.calculate_capability(drifting, usl=50.0, lsl=-50.0)
+
+    assert res["stable"] is False
+    assert res["capability_is_meaningful"] is False
+    assert res["cpk"] > 1.33, "the point is that the raw index still looks capable"
+
+    fired = [c["name"] for c in res["stability_criteria"] if c["fired"]]
+    assert fired == ["fitted_trend_sigmas"], "the other three are blind to this one"
+    trend = next(c for c in res["stability_criteria"] if c["name"] == "fitted_trend_sigmas")
+    assert trend["value"] > po.CAPABILITY_TREND_DRIFT_SIGMAS
+    assert "end to end" in trend["reason"]
+
+
+def test_capability_trend_needs_a_real_size_not_only_significance():
+    # A significant slope is not enough on its own - a long enough series makes a
+    # negligible slope significant, which is why this file avoids bare hypothesis
+    # tests. A tiny drift over 2,000 points is unmistakably significant and still
+    # must not fail the process.
+    tiny = np.random.default_rng(2).normal(0.0, 1.0, 2000) + np.linspace(0.0, 0.2, 2000)
+    res = po.calculate_capability(tiny, usl=50.0, lsl=-50.0)
+
+    trend = next(c for c in res["stability_criteria"] if c["name"] == "fitted_trend_sigmas")
+    assert trend["value"] < po.CAPABILITY_TREND_DRIFT_SIGMAS
+    assert trend["fired"] is False
+
+
+def test_capability_trend_abstains_when_a_line_would_mean_nothing():
+    # Two points always fit a line perfectly and a flat series has no sigma to
+    # measure a slope against. Neither is evidence of instability.
+    short = po.calculate_capability([1.0, 2.0], usl=5.0, lsl=0.0)
+    trend = next(c for c in short["stability_criteria"] if c["name"] == "fitted_trend_sigmas")
+    assert trend["value"] is None
+    assert trend["fired"] is False
+
+    flat = po.calculate_capability(np.full(50, 7.0), usl=10.0, lsl=4.0)
+    trend = next(c for c in flat["stability_criteria"] if c["name"] == "fitted_trend_sigmas")
+    assert trend["fired"] is False
+
+
+def test_capability_widens_the_test_when_sigma_came_from_a_short_window():
+    # 300 in-control readings with sigma estimated from the first 40. That window
+    # underestimates sigma by 30% on this seed, and every criterion then reads the
+    # error in its own ruler: before the correction all three fired on data that is
+    # fine. Measured, the gate called healthy series unstable 25.0% of the time at
+    # this window against 1.4% when the series is its own baseline.
+    healthy = np.random.default_rng(10).normal(100.0, 1.0, 300)
+    res = po.calculate_capability(healthy, usl=150.0, lsl=50.0, baseline_n=40)
+
+    assert res["stable"] is True, res["interpretation"]
+    # The widening shows up as the limit that was actually applied, rather than
+    # being hidden inside a sigma the caller cannot see.
+    ratio = next(c for c in res["stability_criteria"] if c["name"] == "sigma_ratio")
+    assert ratio["limit"] > po.CAPABILITY_SIGMA_RATIO_LIMIT
+    assert ratio["value"] == res["sigma_ratio"]
+
+
+def test_capability_baseline_widening_never_reaches_the_indices():
+    # The correction describes how well the window pinned sigma down, not the
+    # process. A Cpk that quietly moved with the choice of baseline window would be
+    # a worse bug than the false alarms this fixes, so every index must still agree
+    # with the sigma reported beside it.
+    healthy = np.random.default_rng(10).normal(100.0, 1.0, 300)
+    res = po.calculate_capability(healthy, usl=150.0, lsl=50.0, baseline_n=40)
+
+    assert res["cp"] == pytest.approx(100.0 / (6.0 * res["sigma_within"]))
+    assert res["cpu"] == pytest.approx((150.0 - res["mean"]) / (3.0 * res["sigma_within"]))
+    assert res["cpl"] == pytest.approx((res["mean"] - 50.0) / (3.0 * res["sigma_within"]))
+    assert res["sigma_ratio"] == pytest.approx(res["sigma_overall"] / res["sigma_within"])
+
+
+def test_capability_without_a_baseline_window_applies_no_widening():
+    # With no window the series estimates its own sigma from every point, so there
+    # is no estimation error to pay for and the limits stay exactly where they were.
+    healthy = np.random.default_rng(10).normal(100.0, 1.0, 300)
+    res = po.calculate_capability(healthy, usl=150.0, lsl=50.0)
+
+    ratio = next(c for c in res["stability_criteria"] if c["name"] == "sigma_ratio")
+    assert ratio["limit"] == po.CAPABILITY_SIGMA_RATIO_LIMIT
+
+
+def test_capability_baseline_inflation_constant_is_documented():
+    assert po.CAPABILITY_BASELINE_INFLATION_K == 2.0
+
+
+def test_capability_outlier_criterion_needs_more_than_chance_on_a_short_series():
+    # A 1% rate on 50 points is one reading. Chance alone supplies at least one
+    # point beyond 3 sigma 12.6% of the time, so the rate limit on its own turns
+    # into "any single outlier" and reads noise: the gate called healthy 50-point
+    # series unstable 13.1% of the time. The count now has to be more than chance
+    # explains as well.
+    healthy = np.random.default_rng(1).normal(0.0, 1.0, 50)
+    res = po.calculate_capability(healthy, usl=50.0, lsl=-50.0)
+
+    outlier = next(c for c in res["stability_criteria"] if c["name"] == "outlier_rate_beyond_3_sigma")
+    # The practical half of the test is still exceeded - one point in fifty is 2%.
+    assert outlier["value"] > po.CAPABILITY_OUTLIER_RATE_LIMIT
+    # ...and the statistical half is what stops it, so nothing fires.
+    assert outlier["fired"] is False
+    assert res["stable"] is True, res["interpretation"]
+
+
+def test_capability_outlier_criterion_still_fires_when_the_count_is_real():
+    # The Binomial test must not blunt the criterion where the fraction has
+    # resolution. Fifteen genuine outliers in 1,000 points is 1.5%, and chance
+    # produces that many with probability far below alpha, so it fires exactly as
+    # it did before - measured, nothing at n >= 100 changed.
+    rng = np.random.default_rng(4)
+    contaminated = rng.normal(0.0, 1.0, 1000)
+    contaminated[::67] = 12.0
+
+    res = po.calculate_capability(contaminated, usl=50.0, lsl=-50.0)
+    outlier = next(c for c in res["stability_criteria"] if c["name"] == "outlier_rate_beyond_3_sigma")
+    assert outlier["value"] > po.CAPABILITY_OUTLIER_RATE_LIMIT
+    assert outlier["fired"] is True
+    assert "chance alone produces that many" in outlier["reason"]
+    assert res["stable"] is False
+
+
+def test_capability_outlier_alpha_is_a_documented_value():
+    assert po.CAPABILITY_OUTLIER_ALPHA == 0.05
+
+
+def test_capability_trend_criterion_reports_nothing_it_cannot_measure():
+    # A flat series has no spread for the EWMA limits to be built from. A chart
+    # that could not be drawn is not evidence of instability, so the criterion
+    # abstains rather than firing.
+    flat = po.calculate_capability(np.full(50, 7.0), usl=10.0, lsl=4.0)
+    ewma = next(c for c in flat["stability_criteria"] if c["name"] == "ewma_violation_rate")
+    assert ewma["fired"] is False
+    assert ewma["reason"] is None
+
+
+def test_capability_trend_limits_are_documented_values():
+    # All four are chosen from measured curves, so they stay values a reader can
+    # look up. Lambda 0.1 is the standard choice for a shift of about one sigma;
+    # the drift limit is what the library says is a size worth calling, and the
+    # alpha beside it is what stops a long series calling a negligible slope.
+    assert po.CAPABILITY_TREND_LAMBDA == 0.10
+    assert po.CAPABILITY_TREND_RATE_LIMIT == 0.03
+    assert po.CAPABILITY_TREND_DRIFT_SIGMAS == 0.75
+    assert po.CAPABILITY_TREND_ALPHA == 0.01
+
+
 def test_calculate_capability_sigma_within_vs_overall_spread():
     # Drifting series causes sigma_overall > sigma_within, while stable series has sigma_overall ~ sigma_within.
     drift = np.linspace(0.0, 20.0, 100) + np.random.default_rng(7).normal(0.0, 0.5, 100)

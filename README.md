@@ -144,15 +144,49 @@ The stability test is deliberately **not** "did any control rule fire". On
 healthy in-control data, the four Western Electric rules signal at least once
 on 30.5% of 50-point series and **99.5% of 1,000-point series**. A gate built
 on that rejects nearly every real dataset, and the flag stops meaning anything.
-Two length-independent limits are used instead — a sigma ratio above 1.20, or
-more than 1% of points beyond 3 sigma — which fire on about 2% of healthy
-series while still catching a 3-sigma drift 96% of the time and a 2-sigma step
-every time. False alarms now fall as data accumulates instead of climbing
-toward certainty.
 
-Two blind spots are written down rather than left to be discovered: a
-mid-series variance change is caught 44.5% of the time, and a slow 1-sigma
-drift only 4%.
+Four length-independent criteria are used instead, any of which fails the
+process — a sigma ratio above 1.20, more than 1% of points beyond 3 sigma in a
+count chance cannot explain, more than 3% of points whose EWMA has left its own
+limits, or a fitted line moving more than 0.75 sigma end to end with a
+significant slope. Every figure below was measured through the function itself
+over 1,000 trials per cell with fixed seeds, all arms scored on the same series:
+
+| at n = 50 / 100 / 200 / 400 / 1000 | healthy (false alarm) | 1-sigma drift caught |
+|---|---|---|
+| two criteria | 15.8 / 2.2 / 2.3 / 0.4 / 0.0% | 20.6 / 7.4 / 4.1 / 1.8 / **0.2%** |
+| all four | 4.6 / 3.4 / 3.0 / 0.5 / 0.0% | 33.7 / 64.4 / 84.2 / 92.8 / **98.6%** |
+
+**The last two criteria exist because the first two shared a blind spot.** A
+process drifting one sigma across its history widens no moving range and puts no
+single reading beyond 3 sigma, so both original criteria are blind to it by
+construction — the gate called it stable while reporting a Cpk over 2. An EWMA
+accumulates exactly that kind of shift, and a fitted line catches what the EWMA
+cannot: a drift centred on its own mean never leaves ±0.25 sigma, against an
+EWMA limit of 0.688 sigma, while the same drift carries t = 4.56 at 1,000
+points. A 3-sigma drift and a 2-sigma step are caught every time.
+
+**A short series is judged more carefully, not more bravely.** A 1% rate on 50
+points is one single reading, which chance supplies 12.6% of the time, so the
+count carries a Binomial test as well — healthy 50-point series went from 17.4%
+called unstable to 4.6%, with nothing at 100 points or more changing. It is paid
+for at 50 points, where a variance doubling is caught 13.4% of the time instead
+of 46.3%, a rate that had been bought at that 17.4% false-alarm rate.
+
+**`baseline_n` widens the test rather than tightening it.** Sigma estimated from
+40 readings is unbiased and *noisy*, and a criterion compared against a noisy
+ruler reads the noise: the gate called healthy 300-point series unstable 24.8%
+of the time at `baseline_n=40` and 40.4% at 20. The sigma used for testing is
+widened by 1 + 2.0/√N, bringing those to **2.2%** and 7.0% while leaving the
+reported `sigma_within` — and so every capability index — untouched.
+
+What is still missed, stated rather than left to be discovered: a **0.5-sigma
+drift** is called 4.0% of the time at 1,000 points, which is a choice rather
+than a blindness — it sits below the 0.75-sigma limit, and lowering that limit
+to 0.5 raises detection to 53.0% and the healthy rate at 200 points from 3.0% to
+3.7%. A **mid-series variance change** is seen only by the outlier criterion, at
+67.4%. **`baseline_n=20`** still reports 7.0% of healthy series as unstable, and
+twenty points genuinely cannot pin down a sigma.
 
 ### Stage 5 — Has it drifted since?
 
@@ -300,6 +334,18 @@ now impossible:
 4. **New arguments default to the previous behaviour.** Adding a feature never
    changes an existing call's result.
 5. **Zero ruff errors, with no warning tier.**
+6. **Numbers are reported as measured, never as they would look best.** Every
+   figure in this README and in the docstrings came from a script in this
+   repository, run against the shipped function rather than a design-time
+   stand-in, and can be re-run. Where a change costs something — power given
+   up, a false-alarm rate that stays high, a blind spot that remains — the cost
+   is stated beside the gain, with its number. A detection rate is never quoted
+   without the false-alarm rate it was bought at: 46.3% bought at a 17.4%
+   false-alarm rate is not better than 13.4% bought at 4.6%, and presenting it
+   that way would be the flattery this rule exists to forbid. Seeds are fixed,
+   so a reader can re-run the script and get the same table. A model that
+   flatters its own results is worse than no model, because it takes away the
+   reader's ability to check it.
 
 ---
 

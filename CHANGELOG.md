@@ -11,6 +11,128 @@ only *what* changed makes the same mistake easy to reintroduce.
 
 ---
 
+## [1.7.0] - 2026-09-02
+
+The stability gate inside `calculate_capability()` went from two criteria to four,
+and the two it already had were repaired. `stable` and `capability_is_meaningful`
+therefore change value on data that used to pass, which is why this is a minor
+version and not a patch.
+
+**Every figure below was measured through `calculate_capability()` itself over
+1,000 trials per cell with fixed seeds, all arms scored on the same series, at
+n = 50 / 100 / 200 / 400 / 1000.** Where a change costs detection, the cost is
+stated beside the gain.
+
+### Changed
+
+- **A slow drift is no longer called stable.** A series drifting one sigma end to
+  end came back `stable: True` with a Cpk over 2 - "capable", for a process walking
+  away from its own mean. Neither original criterion can see that shape: a slow
+  drift widens no moving range, so `sigma_ratio` stays near 1.1 against a limit of
+  1.20, and no single reading is extreme, so the outlier rate stays under 1%.
+
+  The third criterion uses an instrument the library already shipped and had never
+  called from here, `calculate_ewma_chart`, at lambda 0.1 - the standard choice for
+  a one-sigma shift, and the band where the ARL literature puts EWMA ahead of
+  Shewhart-type rules.
+
+  | 1-sigma drift caught | 50 | 100 | 200 | 400 | 1000 |
+  |---|---|---|---|---|---|
+  | before | 20.6% | 7.4% | 4.1% | 1.8% | **0.2%** |
+  | after | 25.2% | 27.0% | 43.3% | 58.1% | **80.1%** |
+
+  Healthy false alarms moved 15.8 / 2.2 / 2.3 / 0.4 / 0.0% to
+  16.5 / 2.9 / 3.0 / 0.5 / 0.0%. Detection had been *falling* as data accumulated,
+  because a longer drift is more thoroughly absorbed into `sigma_overall`.
+
+  **The criterion is a rate, not "the EWMA signalled at least once."** At lambda 0.1
+  that form fires on 4.1 / 7.6 / 18.1 / 34.3 / 66.1% of healthy series - the same
+  length-dependent trap that disqualified the Western Electric rule set as a gate.
+
+- **A fourth criterion: a straight line fitted across the series.** The EWMA cannot
+  see a half-sigma drift at any lambda - centred on its own mean it never leaves
+  +/-0.25 sigma, against an EWMA limit of 0.688 sigma - while a slope test carries
+  t = 4.56 on the same data at n=1000. A significant slope alone is not enough,
+  because a long enough series makes a negligible slope significant, so the fitted
+  total drift must also exceed 0.75 sigma.
+
+  | 1-sigma drift caught | 50 | 100 | 200 | 400 | 1000 |
+  |---|---|---|---|---|---|
+  | three criteria | 14.0% | 27.0% | 43.3% | 58.1% | 80.1% |
+  | four criteria | 33.7% | 64.4% | 84.2% | 92.8% | **98.6%** |
+
+  Healthy false alarms went 3.4 / 2.9 / 3.0 / 0.5 / 0.0% to
+  4.6 / 3.4 / 3.0 / 0.5 / 0.0% - unchanged at n >= 200, the whole cost landing on
+  the two shortest lengths. A 2-sigma step now reaches 100% at every length.
+
+- **The outlier criterion stopped reading noise on short series.** A 1% rate on 50
+  points is one single reading, and chance puts at least one point beyond 3 sigma
+  there 12.6% of the time, so on short series the criterion had degenerated into
+  "any outlier at all". The rate limit is unchanged; the count must now also be more
+  than chance explains, tested against Binomial(n, 0.0027) at alpha 0.05 - practical
+  and statistical significance together, the shape `check_asset_drift` already uses.
+
+  | healthy | 50 | 100 | 200 | 400 | 1000 |
+  |---|---|---|---|---|---|
+  | before | 17.4% | 3.4% | 3.0% | 0.5% | 0.0% |
+  | after | **4.6%** | 3.4% | 3.0% | 0.5% | 0.0% |
+
+  Nothing at n >= 100 moved: at 1,000 points the rate limit already demands 11
+  outliers where chance produces 2.7, so the test is never the deciding factor. The
+  price falls entirely on 50-point series and is real - a variance doubling is caught
+  13.4% of the time there instead of 46.3%, a 1-sigma drift 33.7% instead of 42.2%.
+  Both older figures were bought at that 17.4% false-alarm rate.
+
+- **A short `baseline_n` no longer makes the gate cry wolf.** The window estimates
+  `sigma_within` from its first N readings: unbiased, but noisy, while every
+  criterion is calibrated against a sigma taken from the whole series. A criterion
+  compared against a noisy ruler reads the noise.
+
+  | healthy, 300 points | N=20 | N=30 | N=40 | N=60 | N=100 | N=150 |
+  |---|---|---|---|---|---|---|
+  | before | 40.4% | 28.4% | 24.8% | 15.8% | 7.4% | 4.8% |
+  | after | 7.0% | 2.4% | **2.2%** | 1.2% | 0.4% | 0.0% |
+
+  The sigma used **for testing** is widened by `1 + 2.0 / sqrt(N)`. **It never
+  touches the reported `sigma_within`, so no capability index moves** - a Cpk that
+  shifted with the choice of Phase I window would be a worse defect than the false
+  alarms this removes, and a test pins Cp/Cpu/Cpl to the sigma reported beside them.
+  The sigma-ratio criterion widens its limit rather than its sigma, so the value in
+  `stability_criteria` still equals the reported `sigma_ratio`.
+
+  With the instability starting when the window closes, a 2-sigma step is still
+  caught 100% of the time at every window; a variance doubling goes from 99.6% to
+  81.4% at N=20 and 100% to 95.0% at N=40; a 1-sigma drift from 94.8% to 68.2% and
+  97.8% to 79.6%. N=20 still runs hot at 7.0%: twenty points cannot pin down a
+  sigma, and no correction can invent the information.
+
+  Behaviour with no `baseline_n` is unchanged.
+
+### Added
+
+- **`stability_criteria` in the `calculate_capability()` result.** Every criterion
+  reports itself - `name`, the `value` measured, the `limit` it was compared
+  against, whether it `fired`, and the `reason` - so a verdict can be read instead
+  of re-derived. Adding a criterion is one entry in a registry, with the
+  false-alarm rate and power that justify its limit in its own docstring; the two
+  original criteria kept their limits and wording exactly, verified against 21
+  frozen cases.
+- `CAPABILITY_TREND_LAMBDA` (0.10), `CAPABILITY_TREND_RATE_LIMIT` (0.03),
+  `CAPABILITY_OUTLIER_ALPHA` (0.05), `CAPABILITY_BASELINE_INFLATION_K` (2.0),
+  `CAPABILITY_TREND_DRIFT_SIGMAS` (0.75) and `CAPABILITY_TREND_ALPHA` (0.01),
+  exported beside the limits they join so a reader can look them up.
+
+### Known limits, stated rather than left to be found
+
+- A **0.5-sigma drift** is called 4.0% of the time at n=1000. That is a choice, not
+  a blindness: it sits below `CAPABILITY_TREND_DRIFT_SIGMAS`. Lowering that to 0.5
+  raises detection to 53.0% and the healthy rate at n=200 from 3.0% to 3.7%.
+- A **mid-series variance change** is seen only by the outlier criterion, at 67.4%
+  by n=1000. The ratio and the fitted line are both blind to it by construction.
+- **`baseline_n=20`** still reports 7.0% of healthy series as unstable.
+- At **n=50** the gate calls 4.6% of healthy series unstable, against 0.0% at
+  n=1000. Short series remain the weakest case.
+
 ## [1.6.1] - 2026-08-30
 
 ### Removed

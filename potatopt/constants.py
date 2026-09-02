@@ -98,21 +98,102 @@ SEED_SWEEP_DEFAULT = (0, 1, 2, 3, 4)
 CALIBRATION_DEFAULT_BINS = 10
 CALIBRATION_ECE_LIMIT = 0.05
 
-# The two limits calculate_capability() uses to decide whether a process is stable
-# enough for Cp/Cpk to describe anything. Neither is "any control rule fired":
-# measured on healthy in-control data, the Western Electric set signals at least
-# once on 30.5% of 50-point series and 99.5% of 1,000-point series, so a gate
+# The four criteria calculate_capability() uses to decide whether a process is
+# stable enough for Cp/Cpk to describe anything. None of them is "any control rule
+# fired": measured on healthy in-control data, the Western Electric set signals at
+# least once on 30.5% of 50-point series and 99.5% of 1,000-point ones, so a gate
 # built on it would reject almost every real data set.
 #
-# sigma_overall / sigma_within above this means the variation is arriving BETWEEN
-# subgroups rather than within them. On healthy data the ratio sits at 0.99-1.00
-# at every length tested; 1.20 fired on 0.0% of 400 trials at n >= 100, while
-# catching a 3-sigma drift 97.7% of the time and a 2-sigma step 99.3%.
+# Every figure below comes from `measure_gate_history.py`, run against
+# calculate_capability() itself over 1,000 trials per cell with fixed seeds, all
+# arms scored on the same series. Lengths are n = 50 / 100 / 200 / 400 / 1000.
+
+# 1. Variation arriving BETWEEN subgroups rather than within them. On healthy data
+# the ratio sits at 0.99-1.00 whatever the length. Blind to a variance change,
+# which lifts sigma_within and sigma_overall together and leaves the ratio near 1.
 CAPABILITY_SIGMA_RATIO_LIMIT = 1.20
 
-# Fraction of points beyond 3 sigma that chance no longer explains. This covers
-# the ratio's blind spot - a variance change lifts sigma_within and sigma_overall
-# together and leaves the ratio near 1. Chance puts 0.27% of points outside; this
-# limit fires on 1.0-2.7% of healthy series and on 47.3% of series whose variance
-# doubles halfway through, where the ratio alone manages 0.7%.
+# 2. Points beyond 3 sigma at a rate chance does not explain. Chance puts 0.27% of
+# points outside, so this covers the ratio's blind spot: it is the only criterion
+# that sees a mid-series variance doubling, at 67.4% by n=1000.
 CAPABILITY_OUTLIER_RATE_LIMIT = 0.01
+
+# ...but a fraction has no resolution on a short series: at n=50 a single point
+# beyond 3 sigma is already 2%, and chance alone puts at least one point out there
+# 12.6% of the time - 1 - (1 - 0.0027)^50. So the COUNT must also be more than
+# chance explains, tested against Binomial(n, NORMAL_TAIL_BEYOND_3_SIGMA). Practical
+# significance and statistical significance both required, the same shape
+# check_asset_drift uses for small batches.
+#
+# It binds only where the fraction is too coarse - at n=1000 the rate limit already
+# demands 11 points where chance produces 2.7 - and the measurement says so:
+#   healthy, rate alone   17.4 / 3.4 / 3.0 / 0.5 / 0.0%
+#   healthy, with Binomial 4.6 / 3.4 / 3.0 / 0.5 / 0.0%
+# Only the 50-point column moves. What that costs, also only at n=50: a variance
+# doubling is caught 13.4% of the time instead of 46.3%, and a 1-sigma drift 33.7%
+# instead of 42.2%. Both older figures were bought at a 17.4% false-alarm rate on
+# healthy data, so the 50-point verdict was closer to a coin flip than a reading.
+NORMAL_TAIL_BEYOND_3_SIGMA = 0.0027
+CAPABILITY_OUTLIER_ALPHA = 0.05
+
+# 3. A sustained drift, which neither criterion above can see: it widens no moving
+# range and puts no single point out of bounds. The EWMA accumulates a shift too
+# small to break a 3-sigma limit until the chart crosses. lambda 0.1 is the standard
+# choice for a shift of about 1 sigma.
+#
+# The limit is a RATE, not "the EWMA signalled at least once". At this lambda that
+# form fires on 4.1 / 7.6 / 18.1 / 34.3 / 66.1% of healthy series - climbing with
+# the amount of data until it condemns everything, the same length-dependent trap
+# that disqualified the Western Electric set.
+#
+# Adding it (measured with the outlier rate as a bare fraction, which is what the
+# gate had at the time):
+#   healthy       15.8 / 2.2 / 2.3 / 0.4 / 0.0%  ->  16.5 / 2.9 / 3.0 / 0.5 / 0.0%
+#   1-sigma drift 20.6 / 7.4 / 4.1 / 1.8 / 0.2%  ->  25.2 / 27.0 / 43.3 / 58.1 / 80.1%
+# The direction is what matters: detection had been FALLING as data accumulated,
+# because a longer drift is more thoroughly absorbed into sigma_overall.
+CAPABILITY_TREND_LAMBDA = 0.10
+CAPABILITY_TREND_RATE_LIMIT = 0.03
+
+# All four criteria are calibrated against a sigma estimated from the whole series.
+# `baseline_n` estimates it from the first m points instead, which is unbiased but
+# noisy - and a criterion compared against a noisy ruler reads the noise. On 300
+# in-control points at m = 20 / 30 / 40 / 60 / 100 / 150 the gate called healthy
+# series unstable 40.4 / 28.4 / 24.8 / 15.8 / 7.4 / 4.8% of the time.
+#
+# So the sigma used FOR TESTING is widened by 1 + k / sqrt(m). It never touches the
+# reported sigma_within, and therefore never moves Cp, Cpk, Pp or Ppk. With k = 2.0,
+# both arms on the same series:
+#   healthy, before  40.4 / 28.4 / 24.8 / 15.8 / 7.4 / 4.8%
+#   healthy, after    7.0 /  2.4 /  2.2 /  1.2 / 0.4 / 0.0%
+# With the instability starting when the window closes: a 2-sigma step is still
+# caught 100% of the time at every window; a variance doubling goes from 99.6% to
+# 81.4% at m=20 and from 100% to 95.0% at m=40; a 1-sigma drift from 94.8% to 68.2%
+# and from 97.8% to 79.6%. Those detections had been bought at 40.4% and 24.8%
+# false-alarm rates.
+#
+# m=20 still runs hot at 7.0%. Twenty points cannot pin down a sigma, and no
+# correction here can invent the information; the number is stated, not smoothed.
+CAPABILITY_BASELINE_INFLATION_K = 2.0
+
+# 4. A straight line fitted across the series. The EWMA cannot see a half-sigma
+# drift at any lambda - centred on its own mean such a drift never leaves +/-0.25
+# sigma, against an EWMA limit of 0.688 sigma - while a slope test carries t = 4.56
+# on the same data at n=1000 (and t = 1.02 at n=50, where it really is out of reach).
+#
+# A significant slope alone is not enough: a long enough series makes a negligible
+# slope significant. The fitted total drift must ALSO exceed a stated size, which is
+# what makes this a statement about the process rather than about the sample.
+#
+# Adding it to the three above:
+#   healthy        3.4 / 2.9 / 3.0 / 0.5 / 0.0%  ->  4.6 / 3.4 / 3.0 / 0.5 / 0.0%
+#   1-sigma drift 14.0 / 27.0 / 43.3 / 58.1 / 80.1%  ->  33.7 / 64.4 / 84.2 / 92.8 / 98.6%
+# At n >= 200 the false-alarm rate does not move at all; the whole cost is 1.2 points
+# at n=50 and 0.5 at n=100. A 2-sigma step reaches 100% at every length.
+#
+# A 0.5-sigma drift is still called only 4.0% of the time at n=1000, and that is a
+# CHOICE rather than a blind spot: it sits below the size this limit calls worth
+# reporting. Lowering CAPABILITY_TREND_DRIFT_SIGMAS to 0.5 raises that to 53.0%
+# while the healthy rate at n=200 goes from 3.0% to 3.7%.
+CAPABILITY_TREND_DRIFT_SIGMAS = 0.75
+CAPABILITY_TREND_ALPHA = 0.01
