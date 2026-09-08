@@ -68,8 +68,9 @@ minute, and a test fails if the tour ever falls behind the public API.
 | 3 | Is the process stable? | `spc.py` | `calculate_ewma_chart`, `calculate_cusum_chart`, `calculate_control_rules` |
 | 4 | Is it capable? | `quality.py` | `calculate_capability` |
 | 5 | Has it drifted since? | `drift.py` | `check_data_drift`, `check_asset_drift`, `calculate_psi` |
-| 6 | What is it costing me? | `reliability.py` | `calculate_mtbf`, `calculate_mttr`, `calculate_availability`, `calculate_oee`, `calculate_pareto` |
-| 7 | Can a model help? | `engine.py`, `analysis.py`, `calibration.py` | `PotatOptEngine`, `auto_analyze`, `check_calibration`, `run_seed_sweep` |
+| 6 | What is it costing me? | `reliability.py` | `calculate_mtbf`, `calculate_mttr`, `calculate_availability`, `calculate_oee`, `calculate_pareto`, `calculate_time_between_failures`, `calculate_weibull` |
+| 7 | Are the rows a sequence? | `sequence.py` | `build_failure_labels`, `add_window_features` |
+| 8 | Can a model help? | `engine.py`, `analysis.py`, `calibration.py` | `PotatOptEngine`, `auto_analyze`, `check_calibration`, `run_seed_sweep` |
 
 ### Stage 1 — Can I trust this data?
 
@@ -229,16 +230,185 @@ po.calculate_pareto(work_orders, "failure_mode", value_col="downtime_hours")
 rarely the same list. The most frequent failure mode is often cheap; the
 expensive one happens twice a year.
 
-### Stage 7 — Can a model help?
+**MTBF reports a failure rate it is not always entitled to.** `failure_rate_per_hour`
+is `1 / MTBF`, which is the instantaneous rate only while the hazard does not
+change with age. A machine that is wearing out has a rising hazard, so the figure
+understates the risk of failing soon - quietly, and in the reassuring direction.
+`calculate_mtbf` now says so in `failure_rate_assumes_constant_hazard`, and two
+functions test the assumption rather than leaving it stated:
 
 ```python
+tbf = po.calculate_time_between_failures(work_orders, asset_col="machine_id")
+haz = po.calculate_weibull(tbf["intervals"])
+
+haz["beta"]                      # 2.29 - above 1, so the hazard is rising
+haz["hazard_pattern"]            # 'wear_out'
+haz["constant_hazard_is_valid"]  # False, with the reason attached
+haz["b10_life"]                  # the hour by which a tenth have failed
+```
+
+Gaps are measured **within** each asset: the time from machine A failing to
+machine B failing is not a time between failures of anything. N failures on one
+machine give N-1 intervals, so a fleet with two failures each yields far fewer
+intervals than the failure count suggests.
+
+The verdict is a bootstrap interval on `beta`, **shifted by the bootstrap's own
+estimate of its bias**. Maximum likelihood overestimates the Weibull shape on
+small samples and a raw percentile interval carries that error straight into the
+answer. Measured through the shipped function over 300 trials per cell, at the
+shipped default of 500 bootstrap resamples:
+
+| intervals | false alarm (true beta = 1) | beta 1.5 | beta 2.0 | beta 3.0 |
+|---|---|---|---|---|
+| 8 | 9.0% | 29.7% | 62.3% | 83.3% |
+| 15 | 11.3% | 54.7% | 91.0% | 100% |
+| 30 | 7.0% | 85.7% | 99.7% | 100% |
+| 60 | 6.0% | 99.7% | 100% | 100% |
+| 120 | 5.3% | 100% | 100% | 100% |
+| 300 | 5.0% | 100% | 100% | 100% |
+
+**The correction is paid for, and the bill is real.** Uncorrected, the same test
+caught a true beta of 1.5 on 78.0% of 8-interval samples instead of 29.7% - but
+it also called 29.3% of genuinely constant-hazard machines "wearing out", against
+9.0% now. Those two detection rates are not comparable as they stand, which is
+the whole reason the false-alarm column sits beside them. The pivotal interval
+was measured on the same draws and rejected: it holds false alarms at 9.0% while
+detecting a beta of 3.0 on 0.7% of 8-interval samples, which is no test at all.
+
+**What is still wrong, stated rather than left to be found.** Below 30 intervals
+the result carries `small_sample_warning`, because the false-alarm rate has not
+reached its nominal 5% there and the reported `beta` is biased upward and **not**
+corrected: on data whose true shape is 1.00, the median fitted `beta` was 1.14 at
+8 intervals and 1.06 at 15, against 1.01 at 120. Only the interval that decides
+the verdict is corrected, so that `beta` stays the same quantity any other tool
+reports for the same data.
+
+### Stage 7 — Are the rows a sequence, not a pile?
+
+Every other module treats a DataFrame as independent rows. For maintenance that
+is wrong twice over: the rows are a time series per machine, and degradation is a
+**trend, not a level**. A single row of sensor values cannot say that a bearing is
+running hotter than it used to.
+
+```python
+labelled, label_report = po.build_failure_labels(
+    readings, events, asset_col="machine_id", time_col="hour", horizon=24)
+
+featured, feature_report = po.add_window_features(
+    labelled, asset_col="machine_id", time_col="hour",
+    windows=(12, 24), label_col="failure", baseline_n=100)
+```
+
+`build_failure_labels` is the counterpart `auto_analyze` was missing: a historian
+gives readings and a CMMS gives failures, and **neither gives a label**. A row is
+positive when the next failure *for that machine* falls within `horizon`. The
+reading taken at the moment of failure is not positive - a machine that has just
+broken is not a machine about to break, and labelling it teaches the model to
+recognise the present. It also emits `time_to_event`, which is the RUL target.
+
+It reports what it had to assume rather than assuming it quietly:
+`assets_without_events` names machines that get an all-zero label column, because
+"it never failed" and "we have no record of it failing" are different claims;
+`censored_rows` counts readings after the last known failure, whose outcome is
+unknown; `events_without_readings` names a join that silently dropped rows.
+
+`add_window_features` builds rolling means, standard deviations, average rate of
+change, and the distance from each machine's **own** baseline - the same reasoning
+`check_asset_drift` uses, because one machine runs by a door and one runs hot.
+
+**Every feature is causal by construction, and a test proves it** rather than the
+docstring claiming it: the suite corrupts every reading after a cut point and
+asserts that not one feature value before the cut moves. A centred window or a
+baseline measured over the whole series fails that test immediately instead of
+months later inside a score nobody can explain. Rows inside the baseline window
+get `NaN`, never a number, because those readings defined the baseline - and
+`drop_incomplete=False` does not switch that guard back on.
+
+It costs rows and memory, and says so: on the tour's four machines, 240 of 1,200
+rows go to burn-in before a row has a complete window, and 14 features add
+0.103 MB.
+
+### Stage 8 — Can a model help?
+
+```python
+# a random shuffle answers "how well does this do on rows like the ones it saw"
 X_train, X_val, X_test, y_train, y_val, y_test = po.split_data_three_way(df, "failure")
+
+# an unseen machine, or a later period - two different questions
+po.split_data_three_way(df, "failure", group_col="machine_id")
+po.split_data_three_way(df, "failure", time_col="hour")
+po.auto_analyze(df, target="failure", group_col="machine_id")
 
 engine = po.PotatOptEngine(task="classification", time_budget=60).fit(X_train, y_train)
 engine.optimize_maintenance_threshold(X_val, y_val)   # tuned on validation, not test
 print(engine.evaluate(X_test, y_test))
 print(engine.calculate_maintenance_cost(X_test, y_test))
 ```
+
+**Which rows are held out decides what the score means.** The default shuffles at
+random, and on maintenance data that is wrong in two ways at once: consecutive
+readings from one machine are near-duplicates, so 10:00 lands in train and 10:01
+in test; and every machine appears on both sides, so the model may learn *which
+machine this is* rather than *what degradation looks like* - a skill worth nothing
+on the next machine, which is the machine you will actually be asked about.
+
+`group_col` asks "will this work on a machine I have never seen?". `time_col`
+asks "will this work next month?". **Passing both is refused**, because they are
+different questions with different answers and the caller has to say which one
+the reported number means. `group_col` also drops the identifier from the
+features, since a held-out machine carries ids the encoder never saw.
+
+The draw of machines follows `random_state`, so `run_seed_sweep` measures how far
+the score moves between draws - which matters more than it sounds, because with
+few machines a single held-out set is a noisy estimate rather than a wrong one.
+
+`auto_analyze`'s report records `split.strategy`, the machines held out in
+`split.test_groups`, and `split.test_class_balance_warning` when a rare failure
+mode lands entirely on one side. A group split cannot stratify; that is a real
+cost of asking the harder question, and it is reported rather than hidden.
+
+**What it is worth, measured.** Five simulated plants of twelve machines over 800
+hours each, wear accumulating to a breakdown and resetting after repair; labels
+and features built by the shipped `build_failure_labels()` and
+`add_window_features()`; every arm given the same model budget with its threshold
+tuned on a validation slice cut from its own training rows. Positive rate 10.3 to
+11.5%. **This is a simulation written for this test, not a claim about a real
+plant** - it is evidence that the split strategy changes the answer, not evidence
+of how much it will change yours.
+
+| arm | PR-AUC mean [min-max] | F1 | precision | recall |
+|---|---|---|---|---|
+| random shuffle, raw sensors | 0.410 [0.374-0.454] | 0.367 | 0.228 | 0.952 |
+| unseen machines, raw sensors | 0.314 [0.167-0.492] | 0.320 | 0.201 | 0.868 |
+| later period, raw sensors | 0.301 [0.178-0.438] | 0.359 | 0.243 | 0.851 |
+| unseen machines, + windows | 0.346 [0.230-0.423] | 0.318 | 0.315 | 0.476 |
+| later period, + windows | 0.359 [0.185-0.486] | 0.407 | 0.324 | 0.576 |
+
+Two things in that table, and only two, are worth reading.
+
+**The random shuffle reports a higher number and a steadier one.** PR-AUC 0.410
+against 0.314 and 0.301 - and its spread across the five plants is 0.374 to
+0.454, against 0.167 to 0.492 for held-out machines. The second effect matters
+more than the first: a random split does not merely flatter the score, it hides
+how much the score depends on which machines you happened to get. Nothing about
+holding out whole machines made the model worse; it made the estimate honest, and
+honest is wide.
+
+**Window features buy precision with recall.** On held-out machines, precision
+0.201 to 0.315 while recall falls 0.868 to 0.476 - roughly one in three call-outs
+is real instead of one in five, and roughly half the evidence windows are missed
+that used to be caught. F1 barely moves there (0.320 to 0.318) and improves on
+the later-period split (0.359 to 0.407). Whether that trade is worth making is a
+cost question, which is what `calculate_maintenance_savings()` is for, not a
+question the F1 can answer.
+
+**The honest caveats.** Five seeds is not many, and the arms overlap heavily: the
+window arms' PR-AUC gain (0.314 to 0.346, 0.301 to 0.359) sits inside the spread
+of both. Recall on the held-out-machine window arm ranged from 0.136 to 0.942
+across plants, which says the tuned threshold is itself unstable at this sample
+size. The features also cost 1,200 of 9,600 rows to burn-in and add 21 columns
+and 1.346 MB. The script is `measure_phase5.py`; the seeds are fixed integers and
+it re-runs.
 
 `PotatOptEngine` handles encoding, scaling, imputation, collinear-feature
 pruning, memory downcasting and the AutoML search. It subclasses scikit-learn's
@@ -305,6 +475,11 @@ pointless call-outs cost more than the breakdowns they prevented. Break-even is
 - `optimize_threshold()` fingerprints the rows it tuned on, and `evaluate()`
   returns `threshold_leakage_warning` if you then report results on those same
   rows.
+- `split_data(time_col=...)` moves the boundary earlier rather than cutting
+  through a shared timestamp. Eight machines reporting on the same clock would
+  otherwise put one machine's 10:00 reading in train and another's in test.
+- `add_window_features()` is proved causal by a test that corrupts the future and
+  asserts the past did not move, not by a docstring that says it is.
 
 ### Silence is never an answer
 

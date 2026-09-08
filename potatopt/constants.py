@@ -79,6 +79,19 @@ PARETO_CUTOFF = 0.80
 # The conventional world-class OEE benchmark, reported for context only.
 OEE_WORLD_CLASS = 0.85
 
+# Minimum usable intervals required to fit a Weibull distribution. Below this,
+# parameter estimates are dominated by sample noise.
+WEIBULL_MIN_INTERVALS = 8
+
+# Bootstrap resamples behind the confidence interval on Weibull beta. The
+# interval is bias-corrected rather than a raw percentile, and the resamples
+# are what supply the bias estimate - so lowering this widens nothing, it
+# makes the correction itself noisier.
+WEIBULL_BOOTSTRAP_DEFAULT = 500
+
+# Default two-sided confidence level for the Weibull bootstrap interval.
+WEIBULL_CI_CONFIDENCE = 0.95
+
 # The seed used when the caller does not choose one. A fixed default is right -
 # an unseeded run is not reproducible and cannot be defended in a report - but it
 # was previously hard-coded at every call site, which made the seed invisible and

@@ -118,7 +118,16 @@ def inspect_data(df: pd.DataFrame, target_col: str) -> dict[str, Any]:
 # `float | int` is redundant to a type checker, but the two are not interchangeable
 # here: a float is a proportion and an int is an absolute row count. Spelling both
 # out is what tells a reader the int form is intended rather than an accident.
-def split_data(df: pd.DataFrame, target_col: str, task: str = "classification", test_size: float | int = 0.2, random_state: int = DEFAULT_RANDOM_STATE) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:  # noqa: PYI041
+def split_data(
+    df: pd.DataFrame,
+    target_col: str,
+    task: str = "classification",
+    test_size: float | int = 0.2,  # noqa: PYI041 - an int is an absolute row count, not a redundant float
+    random_state: int = DEFAULT_RANDOM_STATE,
+    group_col: str | None = None,
+    time_col: str | None = None,
+    drop_group_col: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
     """
     Split the dataset into Training and Testing partitions (default 80/20).
 
@@ -129,7 +138,28 @@ def split_data(df: pd.DataFrame, target_col: str, task: str = "classification", 
     - random_state: seed for the shuffle. Which rows land in Test moves the score,
       especially on the small, imbalanced datasets this library is aimed at, so
       change it deliberately and report which one you used. Ignored for
-      forecasting, where nothing is shuffled.
+      forecasting and time-aware splitting, where nothing is shuffled.
+      On the group split path, the draw must depend on random_state: a caller
+      re-runs with several seeds to see how much the score moves between draws of
+      machines, and that only works if the draw changes.
+    - group_col: column holding group/asset identifiers. The default split
+      shuffles rows at random. On maintenance data that is wrong in two ways at
+      once. Consecutive readings from one machine are nearly duplicates, so a
+      random shuffle puts 10:00 in train and 10:01 in test and the model is
+      scored on rows it has effectively already seen. And every machine appears
+      on both sides, so the model can learn which machine this is instead of
+      what degradation looks like — and that skill does not transfer to a machine
+      it has never met, which is exactly the machine it will be asked about.
+      `group_col` answers "will this work on a machine I have never seen?".
+    - time_col: column holding timestamps to split chronologically. Answers
+      "will this work next month?". `group_col` and `time_col` are different
+      questions with different answers, so passing both is refused rather than
+      silently answering one of them.
+    - drop_group_col: bool, default True. Removes `group_col` from both returned
+      feature frames. The held-out groups carry values the encoder never saw,
+      so the column contributes nothing on the test side while giving the model
+      an identifier to memorise on the train side. Set it False when you need the
+      column back for reporting.
     """
     if df is None or df.empty:
         raise ValueError("Dataset is empty.")
@@ -156,6 +186,18 @@ def split_data(df: pd.DataFrame, target_col: str, task: str = "classification", 
         raise ValueError(f"random_state must be an integer, got {random_state!r}.")  # noqa: TRY004
     random_state = int(random_state)
 
+    if group_col is not None and time_col is not None:
+        raise ValueError(
+            f"`group_col` and `time_col` answer different questions ('an unseen machine' vs 'a later period'); "
+            f"the caller has to choose which one the reported score should mean (got group_col={group_col!r}, time_col={time_col!r})."
+        )
+
+    if group_col is not None and group_col not in df.columns:
+        raise ValueError(f"Group column '{group_col}' not found in the dataset.")
+
+    if time_col is not None and time_col not in df.columns:
+        raise ValueError(f"Time column '{time_col}' not found in the dataset.")
+
     if target_col not in df.columns:
         raise ValueError(f"Target column '{target_col}' not found in the dataset.")
         
@@ -175,6 +217,105 @@ def split_data(df: pd.DataFrame, target_col: str, task: str = "classification", 
     X = df_clean.drop(columns=[target_col])
     target_after_drop = df_clean[target_col]
     y = target_after_drop.iloc[:, 0] if isinstance(target_after_drop, pd.DataFrame) else target_after_drop
+
+    if group_col is not None:
+        col_data = df_clean[group_col]
+        group_series = col_data.iloc[:, 0] if isinstance(col_data, pd.DataFrame) else col_data
+        unique_groups = group_series.unique()
+        if len(unique_groups) < 2:
+            raise ValueError(
+                f"Group column '{group_col}' has only {len(unique_groups)} distinct group(s); "
+                f"at least 2 distinct groups required."
+            )
+
+        try:
+            sorted_groups = np.array(sorted(unique_groups))
+        except TypeError:
+            sorted_groups = np.array(sorted(unique_groups, key=str))
+
+        rng = np.random.default_rng(random_state)
+        shuffled_groups = sorted_groups.copy()
+        rng.shuffle(shuffled_groups)
+
+        group_counts = group_series.value_counts(dropna=False)
+        req_size = (test_size * len(df_clean)) if isinstance(test_size, float) else float(test_size)
+
+        test_groups = []
+        current_test_rows = 0
+        for g in shuffled_groups:
+            if len(test_groups) == len(shuffled_groups) - 1:
+                break
+            test_groups.append(g)
+            current_test_rows += int(group_counts.get(g, 0))
+            if current_test_rows >= req_size - 1e-9:
+                break
+
+        test_mask = group_series.isin(test_groups)
+        train_mask = ~test_mask
+
+        X_train = X.loc[train_mask]
+        X_test = X.loc[test_mask]
+        y_train = y.loc[train_mask]
+        y_test = y.loc[test_mask]
+
+        if drop_group_col and group_col in X_train.columns:
+            X_train = X_train.drop(columns=[group_col])
+            X_test = X_test.drop(columns=[group_col])
+
+        return X_train, X_test, y_train, y_test
+
+    if time_col is not None:
+        df_sorted = df_clean.sort_values(by=time_col, kind="mergesort")
+        n_total = len(df_sorted)
+        if isinstance(test_size, float):
+            n_test = round(test_size * n_total)
+        else:
+            n_test = int(test_size)
+
+        cut_idx = n_total - n_test
+        if cut_idx <= 0 or cut_idx >= n_total:
+            raise ValueError(
+                f"Too few distinct timestamps exist for the requested test_size={test_size!r} "
+                f"(total rows: {n_total})."
+            )
+
+        time_data = df_sorted[time_col]
+        time_series = time_data.iloc[:, 0] if isinstance(time_data, pd.DataFrame) else time_data
+
+        initial_cut_idx = cut_idx
+        if cut_idx > 0 and cut_idx < n_total:
+            tie_timestamp = time_series.iloc[cut_idx]
+            val_prev = time_series.iloc[cut_idx - 1]
+            is_tie = (val_prev == tie_timestamp) or (pd.isna(val_prev) and pd.isna(tie_timestamp))
+            while cut_idx > 0 and is_tie:
+                cut_idx -= 1
+                if cut_idx > 0:
+                    val_prev = time_series.iloc[cut_idx - 1]
+                    is_tie = (val_prev == tie_timestamp) or (pd.isna(val_prev) and pd.isna(tie_timestamp))
+
+        moved_by = initial_cut_idx - cut_idx
+        if moved_by > 0:
+            logger.info(
+                f"Moved time split boundary earlier by {moved_by} row(s) to avoid timestamp leakage on '{time_col}'."
+            )
+
+        if cut_idx <= 0 or cut_idx >= n_total:
+            raise ValueError(
+                f"Too few distinct timestamps exist for the requested test_size={test_size!r}; "
+                f"moving boundary earlier to prevent leakage leaves train or test empty."
+            )
+
+        train_part = df_sorted.iloc[:cut_idx]
+        test_part = df_sorted.iloc[cut_idx:]
+
+        X_train = train_part.drop(columns=[target_col])
+        X_test = test_part.drop(columns=[target_col])
+        target_train = train_part[target_col]
+        target_test = test_part[target_col]
+        y_train = target_train.iloc[:, 0] if isinstance(target_train, pd.DataFrame) else target_train
+        y_test = target_test.iloc[:, 0] if isinstance(target_test, pd.DataFrame) else target_test
+
+        return X_train, X_test, y_train, y_test
     
     # Time-series data must never be shuffled
     if task == "forecasting":
@@ -192,7 +333,17 @@ def split_data(df: pd.DataFrame, target_col: str, task: str = "classification", 
         return train_test_split(X, y, test_size=test_size, random_state=random_state, stratify=None)
 
 
-def split_data_three_way(df: pd.DataFrame, target_col: str, task: str = "classification", val_size: float = 0.2, test_size: float = 0.2, random_state: int = DEFAULT_RANDOM_STATE) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.Series]:
+def split_data_three_way(
+    df: pd.DataFrame,
+    target_col: str,
+    task: str = "classification",
+    val_size: float = 0.2,
+    test_size: float = 0.2,
+    random_state: int = DEFAULT_RANDOM_STATE,
+    group_col: str | None = None,
+    time_col: str | None = None,
+    drop_group_col: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.Series]:
     """
     Split the dataset into Training / Validation / Testing partitions.
 
@@ -205,6 +356,11 @@ def split_data_three_way(df: pd.DataFrame, target_col: str, task: str = "classif
     - Classification: both splits are stratified to preserve class balance.
     - Forecasting / Time-Series: no shuffling; the partitions stay in
       chronological order (Train -> Validation -> Test).
+    - Time-aware splitting (time_col): each cut takes the latest rows of what
+      it is given, so the existing two-cut structure yields chronological
+      Train -> Validation -> Test partitions.
+    - Group-aware splitting (group_col): groups are partitioned across all
+      three sets without leakage.
 
     Parameters:
     -----------
@@ -218,6 +374,12 @@ def split_data_three_way(df: pd.DataFrame, target_col: str, task: str = "classif
     random_state : int
         Seed handed to both cuts. Passing one seed here keeps the three-way split
         reproducible as a unit, which is what a reported figure has to be.
+    group_col : str or None, default=None
+        Column holding group/asset identifiers to split on.
+    time_col : str or None, default=None
+        Column holding timestamps to split chronologically.
+    drop_group_col : bool, default True
+        Whether to drop `group_col` from all three returned feature frames.
 
     Returns:
     --------
@@ -233,9 +395,20 @@ def split_data_three_way(df: pd.DataFrame, target_col: str, task: str = "classif
             f"(got {val_size!r} + {test_size!r})."
         )
 
-    # First cut: hold out the Test partition. For forecasting this keeps the
+    # First cut: hold out the Test partition. For forecasting and time_col this keeps the
     # most recent rows as Test, which is the only honest layout for time-series.
-    X_pool, X_test, y_pool, y_test = split_data(df, target_col, task=task, test_size=test_size, random_state=random_state)
+    # On the group path internal calls must keep drop_group_col=False because the second
+    # cut still needs the column to split on.
+    X_pool, X_test, y_pool, y_test = split_data(
+        df,
+        target_col,
+        task=task,
+        test_size=test_size,
+        random_state=random_state,
+        group_col=group_col,
+        time_col=time_col,
+        drop_group_col=False if group_col is not None else drop_group_col,
+    )
 
     # Second cut: carve the Validation partition out of what is left. An exact
     # integer row count is used rather than a rescaled fraction, because
@@ -257,7 +430,24 @@ def split_data_three_way(df: pd.DataFrame, target_col: str, task: str = "classif
 
     df_pool = X_pool.copy()
     df_pool[target_col] = y_pool
-    X_train, X_val, y_train, y_val = split_data(df_pool, target_col, task=task, test_size=n_val_rows, random_state=random_state)
+    X_train, X_val, y_train, y_val = split_data(
+        df_pool,
+        target_col,
+        task=task,
+        test_size=n_val_rows,
+        random_state=random_state,
+        group_col=group_col,
+        time_col=time_col,
+        drop_group_col=False if group_col is not None else drop_group_col,
+    )
+
+    if group_col is not None and drop_group_col:
+        if group_col in X_train.columns:
+            X_train = X_train.drop(columns=[group_col])
+        if group_col in X_val.columns:
+            X_val = X_val.drop(columns=[group_col])
+        if group_col in X_test.columns:
+            X_test = X_test.drop(columns=[group_col])
 
     return X_train, X_val, X_test, y_train, y_val, y_test
 

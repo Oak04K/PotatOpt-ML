@@ -56,7 +56,7 @@ def section(number: int, title: str) -> None:
 
 def main() -> dict[str, Any]:
     """
-    Executes the eight sections of the PotatOpt library tour and returns results.
+    Executes the nine sections of the PotatOpt library tour and returns results.
     """
     results: dict[str, Any] = {}
     rng = np.random.default_rng(42)
@@ -390,10 +390,80 @@ def main() -> dict[str, Any]:
     print(f"Maintenance Cost Savings: ${maint_savings['cost_savings']:,.2f} ({maint_savings['savings_percentage']:.1f}%)")
     print(f"Recall 95% Wilson CI    : {wilson_ci['point']:.3f} [{wilson_ci['lower']:.3f}, {wilson_ci['upper']:.3f}]")
 
+    # MTBF divides hours by failures, so its failure rate is 1 / MTBF - true only
+    # while the hazard rate does not change with age. These two say whether that
+    # holds, on a fleet whose failures come faster as the machines wear.
+    wear_out_hours = np.cumsum(rng.weibull(2.4, 40) * 90.0)
+    wear_out_log = pd.DataFrame({
+        "reported_at": wear_out_hours,
+        "wo_type": ["breakdown"] * len(wear_out_hours),
+    })
+    tbf_res = po.calculate_time_between_failures(wear_out_log)
+    weibull_res = po.calculate_weibull(tbf_res["intervals"])
+
+    results["calculate_time_between_failures"] = tbf_res
+    results["calculate_weibull"] = weibull_res
+
+    print(f"Times between failures  : {tbf_res['n_intervals']} intervals from {tbf_res['n_failures']} breakdowns")
+    print(f"Weibull shape (beta)    : {weibull_res['beta']:.2f} "
+          f"[{weibull_res['beta_ci_lower']:.2f}, {weibull_res['beta_ci_upper']:.2f}] -> {weibull_res['hazard_pattern']}")
+    print(f"Characteristic life eta : {weibull_res['eta']:.1f} hrs | B10 life: {weibull_res['b10_life']:.1f} hrs")
+    print(f"Constant hazard valid   : {weibull_res['constant_hazard_is_valid']}")
+    print(f"  {weibull_res['reason']}")
+    print(f"MTBF states its assumption: failure_rate_assumes_constant_hazard = "
+          f"{mtbf_res['failure_rate_assumes_constant_hazard']}")
+
     # =========================================================================
-    # SECTION 7: Can a model help?
+    # SECTION 7: Are the rows a sequence rather than a pile?
     # =========================================================================
-    section(7, "Can a model help?")
+    section(7, "Are the rows a sequence rather than a pile?")
+
+    # A historian gives readings; a CMMS gives failures. Neither gives a label.
+    seq_rows = []
+    for machine_index in range(4):
+        machine_wear = np.linspace(0.0, 1.0, 300) ** 2
+        seq_rows.append(pd.DataFrame({
+            "machine_id": f"SEQ-{machine_index:02d}",
+            "hour": np.arange(300),
+            # each machine sits at its own level, the way real ones do
+            "temperature": 60.0 + machine_index * 4.0 + 25.0 * machine_wear + rng.normal(0, 0.7, 300),
+            "vibration": 2.0 + 8.0 * machine_wear ** 1.5 + rng.normal(0, 0.12, 300),
+        }))
+    seq_readings = pd.concat(seq_rows, ignore_index=True)
+    seq_events = pd.DataFrame({
+        "machine_id": ["SEQ-00", "SEQ-01", "SEQ-02"],
+        "failed_at": [280, 265, 290],
+    })
+
+    labelled, label_report = po.build_failure_labels(
+        seq_readings, seq_events, asset_col="machine_id", time_col="hour", horizon=24)
+    featured, feature_report = po.add_window_features(
+        labelled, asset_col="machine_id", time_col="hour",
+        value_cols=["temperature", "vibration"], windows=(12, 24),
+        label_col="failure", baseline_n=60)
+
+    results["build_failure_labels"] = label_report
+    results["add_window_features"] = feature_report
+
+    print(f"Labelled rows           : {label_report['rows']} ({label_report['positives']} positive, "
+          f"{label_report['positive_rate'] * 100.0:.2f}%)")
+    print(f"Machines with no event  : {label_report['assets_without_events']} "
+          "- an all-zero label there is an assumption, not a record")
+    print(f"Right-censored rows     : {label_report['censored_rows']} (no later failure, so no known outcome)")
+    print(f"Window features added   : {feature_report['n_features_added']} "
+          f"({feature_report['memory_mb_added']} MB)")
+    print(f"Rows spent on burn-in   : {feature_report['rows_dropped']} of {feature_report['rows_in']} "
+          f"- baseline_n plus the largest window have to fill before a row is complete")
+    print(f"Modelling table         : {featured.shape[0]} rows x {featured.shape[1]} columns, "
+          f"ready for split_data_three_way(group_col='machine_id')")
+    print("A single reading cannot show degradation; a trend can. Every feature here is built")
+    print("from that machine's own past only, which is what makes the score afterwards mean anything.")
+
+
+    # =========================================================================
+    # SECTION 8: Can a model help?
+    # =========================================================================
+    section(8, "Can a model help?")
 
     n_ml_samples = 220
     ml_temp = rng.normal(300.0, 3.0, n_ml_samples)
@@ -552,9 +622,9 @@ def main() -> dict[str, Any]:
     print(f"AutoML Sweep (3 seeds): {sweep_res.get('stability_note')}")
 
     # =========================================================================
-    # SECTION 8: Getting the answers out
+    # SECTION 9: Getting the answers out
     # =========================================================================
-    section(8, "Getting the answers out")
+    section(9, "Getting the answers out")
 
     lib_versions = po.get_library_versions()
     results["get_library_versions"] = lib_versions

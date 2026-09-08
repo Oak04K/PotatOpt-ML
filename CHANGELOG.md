@@ -11,6 +11,136 @@ only *what* changed makes the same mistake easy to reintroduce.
 
 ---
 
+## [1.8.0] - 2026-09-08
+
+Everything the library did up to here treated a DataFrame as a pile of
+independent rows. For condition-based maintenance that is wrong twice over: the
+rows are a time series per machine, and degradation is a trend rather than a
+level. This release adds the module that knows rows have an order, teaches the
+splitter that "a machine I have never seen" and "a month that has not happened"
+are different questions, and stops `calculate_mtbf()` reporting a failure rate it
+is not always entitled to.
+
+**Figures below were measured through the shipped functions**, over 300 trials
+per cell at the shipped default of 500 bootstrap resamples, with explicit integer
+seeds. Where a change costs detection, the cost is stated beside the gain.
+
+### Added
+
+- **`potatopt/sequence.py`, and the two functions that turn a plant's raw records
+  into a modelling table.** `build_failure_labels()` is the counterpart
+  `auto_analyze()` never had: a historian gives readings, a CMMS gives failures,
+  and **neither gives a label**. A row becomes positive when the next failure *for
+  that machine* falls inside `horizon`; the reading taken at the moment of failure
+  does not, because a machine that has just broken is not a machine about to
+  break, and labelling it teaches the model to recognise the present. It also
+  emits `time_to_event`, which is the target an RUL model would need.
+  `lead_time` marks readings that arrive too late to book a slot and counts them
+  in `rows_inside_lead_time` rather than filing them with the healthy ones.
+- **The labeller names what it had to assume.** `assets_without_events` lists
+  machines handed an all-zero label column, because "it never failed" and "we have
+  no record of it failing" are different claims and only one of them is in the
+  data. `censored_rows` counts readings after the last known failure, whose
+  outcome nobody knows. `events_without_readings` names a join that would
+  otherwise have dropped rows in silence.
+- **`add_window_features()`, and a test that proves it causal rather than a
+  docstring that says so.** Rolling mean, standard deviation, mean first
+  difference, and the distance from each machine's own baseline - the reasoning
+  `check_asset_drift()` already used, because one machine runs by a door and one
+  runs hot. The suite corrupts every reading after a cut point and asserts that
+  not one feature value before the cut moves; a centred window or a whole-series
+  baseline fails there immediately instead of months later inside a score nobody
+  can explain. Rows inside the baseline window get `NaN` rather than a number,
+  because those readings defined the baseline, and `drop_incomplete=False` does
+  not switch that guard back off.
+- **`calculate_weibull()` and `calculate_time_between_failures()`.** Gaps are
+  measured within each asset - the time from machine A failing to machine B
+  failing is not a time between failures of anything - and N failures on one
+  machine give N-1 intervals, so a fleet yields far fewer intervals than its
+  failure count suggests. `loc` is fixed at zero: a fitted location would claim
+  equipment cannot fail before some age, which maintenance data does not support.
+- **`group_col`, `time_col` and `drop_group_col` on `split_data()` and
+  `split_data_three_way()`; `group_col` and `time_col` on `auto_analyze()`.** The
+  default shuffle puts 10:00 in train and 10:01 in test, and puts every machine on
+  both sides, so a model is free to learn *which machine this is* instead of what
+  degradation looks like. Passing both arguments is **refused**: they answer
+  different questions and the caller has to say which one the reported score
+  means. The draw of machines follows `random_state`, so `run_seed_sweep()` can
+  measure how far the score moves between draws.
+- **`auto_analyze()`'s `split` entry now records how the cut was made** -
+  `strategy`, `group_col`, `time_col`, `test_groups`, and
+  `test_class_balance_warning` when a rare failure mode lands entirely on one
+  side. A group split cannot stratify; that is a real cost of the harder question
+  and it is reported rather than hidden. A caller comparing the whole `split` dict
+  for equality will see the new keys.
+- **`WEIBULL_MIN_INTERVALS`, `WEIBULL_BOOTSTRAP_DEFAULT`, `WEIBULL_CI_CONFIDENCE`**
+  exported alongside the other constants.
+- **`examples/tour.py` gained a step** and now walks nine, not eight. The test
+  that fails when the tour falls behind `__all__` caught all four new functions
+  immediately, which is what it is for.
+
+### Changed
+
+- **`calculate_mtbf()` owns up to its assumption.** `failure_rate_per_hour` is
+  `1 / MTBF`, which is the instantaneous rate only while the hazard does not
+  change with age. A wearing machine has a rising hazard, so the figure
+  understates the risk of failing soon - quietly, and in the reassuring direction.
+  Two new keys say so: `failure_rate_assumes_constant_hazard` and
+  `constant_hazard_note`, which points at `calculate_weibull()`. Every existing
+  key and value is untouched.
+- **The Weibull confidence interval is bias-corrected, and the correction is the
+  reason the verdict can be trusted at all.** Maximum likelihood overestimates the
+  Weibull shape on small samples and a raw percentile interval carries that error
+  straight into `constant_hazard_is_valid`. Measured on exponential intervals -
+  where beta is exactly 1 and the honest verdict is "constant" - the uncorrected
+  interval excluded 1.0 on **29.3%** of 8-interval samples. Shifting it by the
+  bootstrap's own bias estimate brings the false-alarm rate to
+  **9.0 / 11.3 / 7.0 / 6.0 / 5.3 / 5.0%** at 8 / 15 / 30 / 60 / 120 / 300
+  intervals.
+
+  **It is paid for at the smallest sizes.** A true beta of 1.5 is now caught on
+  29.7% of 8-interval samples instead of 78.0%, and a beta of 2.0 on 62.3%
+  instead of 94.7%. Those pairs are not comparable as they stand: the 78.0% was
+  bought at a 29.3% false-alarm rate and the 29.7% at 9.0%. By 60 intervals the
+  two rules agree to within a point on every arm. The pivotal interval was
+  measured on the same bootstrap draws and rejected - it holds false alarms at
+  9.0% while detecting a beta of 3.0 on **0.7%** of 8-interval samples, which is
+  no test at all.
+- **`calculate_weibull()` fits through a scalar root-find rather than a general
+  optimiser.** With `loc` fixed the two-parameter likelihood collapses to one
+  equation in beta, and eta follows in closed form. It is the same estimate
+  `scipy.stats.weibull_min.fit(x, floc=0)` converges to - agreement within 1e-6
+  relative on shapes from 0.6 to 4.0 - at 0.189 ms per fit against 5.614 ms. Since
+  the interval refits the sample several hundred times, one call at the default
+  went from **2,519 ms to 90 ms**. The general optimiser remains as a fallback for
+  a sample whose root cannot be bracketed.
+- **An out-of-range `confidence` is refused instead of silently replaced.** It
+  previously fell back to 0.95, which made the returned interval mean something
+  other than what the caller asked for, with nothing downstream able to notice.
+
+### Known limits, stated rather than left to be discovered
+
+- **Below 30 intervals the hazard verdict is noisy**, and the result says so in
+  `small_sample_warning`. The false-alarm rate has not reached its nominal 5%
+  there, and the **reported `beta` is biased upward and is not corrected**: on
+  data whose true shape is 1.00, the median fitted beta was **1.14** at 8
+  intervals and 1.06 at 15, against 1.01 at 120. Only the interval that decides
+  the verdict is corrected, so that `beta` stays the same quantity any other tool
+  reports for the same data.
+- **A group split cannot stratify.** On a rare failure mode the test partition can
+  end up single-class; `auto_analyze()` reports this and continues rather than
+  failing.
+- **Window features cost rows.** `baseline_n` plus the largest window must fill
+  before a row is complete - 240 of 1,200 rows on the tour's four machines - and
+  assets shorter than that are named in `assets_skipped` rather than dropped
+  quietly.
+- **Grouped cross-validation is not implemented.** `split_data(group_col=...)`
+  holds out one draw of machines; with few machines that is a noisy estimate, and
+  the current answer is to run `run_seed_sweep()` and read the spread rather than
+  to trust a single draw.
+
+---
+
 ## [1.7.0] - 2026-09-02
 
 The stability gate inside `calculate_capability()` went from two criteria to four,

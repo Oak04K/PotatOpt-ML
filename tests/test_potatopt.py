@@ -1267,12 +1267,43 @@ def test_auto_analyze_returns_a_complete_report(failure_frame):
     assert report["task"] == "classification"
     assert report["rows"] == len(failure_frame)
     assert report["features"] == 4
-    assert report["split"] == {"train": 240, "validation": 80, "test": 80}
+    # The partition sizes are unchanged; `split` also now records HOW the cut was
+    # made, because a score means a different thing under each strategy and the
+    # report has to say which one produced this one.
+    assert report["split"]["train"] == 240
+    assert report["split"]["validation"] == 80
+    assert report["split"]["test"] == 80
+    assert report["split"]["strategy"] == "random"
+    assert report["split"]["group_col"] is None
+    assert report["split"]["time_col"] is None
+    assert report["split"]["test_groups"] is None
+    assert report["split"]["test_class_balance_warning"] is None
     assert report["data_quality"]["dqs"] is not None
     assert report["metrics"]["f1"] is not None
     assert report["cost"]["cost_savings"] is not None
     assert report["threshold"]["tuned_on"] == "validation"
     assert report["model"]["name"]
+
+
+def test_auto_analyze_can_hold_out_whole_machines(failure_frame):
+    """The one-call path has to be able to ask the harder question too, and to say
+    on the report which machines it answered it about.
+
+    Note what the feature count does: the default run above reports 4 features,
+    and one of them is `machine_id`. That is the habit this argument exists to
+    break - under a random split the model is free to learn which machine it is
+    looking at, and that skill is worth nothing on the next machine.
+    """
+    report = po.auto_analyze(
+        failure_frame, target="failure", time_budget=5, group_col="machine_id")
+
+    assert report["ok"] is True
+    assert report["split"]["strategy"] == "group"
+    assert report["split"]["group_col"] == "machine_id"
+    assert report["split"]["test_groups"]
+    # the identifier is held out as the grouping key, so it is no longer a feature
+    assert report["features"] == 3
+    assert set(report["split"]["test_groups"]) <= {"M01", "M02", "M03"}
 
 
 def test_auto_analyze_output_survives_strict_json(failure_frame):

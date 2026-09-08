@@ -33,7 +33,7 @@ Key Architecture Principles:
 
 from __future__ import annotations
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 from typing import Any
 
@@ -95,6 +95,9 @@ from .constants import (
     PSI_MODERATE_SHIFT,
     SEED_SWEEP_DEFAULT,
     SILENT_NULL_TOKENS,
+    WEIBULL_BOOTSTRAP_DEFAULT,
+    WEIBULL_CI_CONFIDENCE,
+    WEIBULL_MIN_INTERVALS,
 )
 from .data import (
     audit_data_quality,
@@ -126,8 +129,11 @@ from .reliability import (
     calculate_mttr,
     calculate_oee,
     calculate_pareto,
+    calculate_time_between_failures,
+    calculate_weibull,
     wilson_confidence_interval,
 )
+from .sequence import add_window_features, build_failure_labels
 from .spc import _lag1_autocorrelation as _lag1_autocorrelation
 from .spc import (
     calculate_control_rules,
@@ -172,6 +178,9 @@ __all__ = [  # noqa: RUF022
     "audit_data_quality",
     "detect_silent_nulls",
     "detect_outliers",
+    # Sequence preparation: labels and window features
+    "build_failure_labels",
+    "add_window_features",
     # Statistical process control and drift
     "calculate_spc_limits",
     "calculate_ewma_chart",
@@ -191,6 +200,8 @@ __all__ = [  # noqa: RUF022
     "calculate_availability",
     "calculate_oee",
     "calculate_pareto",
+    "calculate_time_between_failures",
+    "calculate_weibull",
     # Interop and traceability
     "to_jsonable",
     "enable_audit_log",
@@ -236,4 +247,7 @@ __all__ = [  # noqa: RUF022
     "MODIFIED_ZSCORE_THRESHOLD",
     "PARETO_CUTOFF",
     "OEE_WORLD_CLASS",
+    "WEIBULL_BOOTSTRAP_DEFAULT",
+    "WEIBULL_CI_CONFIDENCE",
+    "WEIBULL_MIN_INTERVALS",
 ]

@@ -16,7 +16,9 @@ def auto_analyze(data: str | pd.DataFrame, target: str, cost_scrap: float = 500.
                  time_budget: int = 30, n_jobs: int = -1, top_features: int | None = 10,
                  save_to: str | None = None, val_size: float = 0.2,
                  test_size: float = 0.2,
-                 random_state: int = DEFAULT_RANDOM_STATE) -> dict[str, Any]:
+                 random_state: int = DEFAULT_RANDOM_STATE,
+                 group_col: str | None = None,
+                 time_col: str | None = None) -> dict[str, Any]:
     """
     Run the whole pipeline in one call and return one JSON-ready report.
 
@@ -49,6 +51,15 @@ def auto_analyze(data: str | pd.DataFrame, target: str, cost_scrap: float = 500.
         Seed for the split and the model search. One call is one seed and therefore
         one sample of the score; `run_seed_sweep` runs several and reports the
         spread, which is what tells you whether the number below is real.
+    group_col : str or None, default=None
+        Column holding group/asset identifiers to split on (passed to
+        `split_data_three_way`). Tests whether the model generalizes to unseen
+        equipment. A grouped score is usually lower than a random one and that
+        is the point of it, not a regression: it reflects what the model will
+        actually deliver on a new machine.
+    time_col : str or None, default=None
+        Column holding timestamps to split chronologically. Tests whether the
+        model generalizes to a later period without temporal leakage.
 
     Returns:
     --------
@@ -110,7 +121,7 @@ def auto_analyze(data: str | pd.DataFrame, target: str, cost_scrap: float = 500.
         # partition stays untouched until it is reported.
         X_train, X_val, X_test, y_train, y_val, y_test = split_data_three_way(
             frame, target, task=resolved_task, val_size=val_size, test_size=test_size,
-            random_state=random_state,
+            random_state=random_state, group_col=group_col, time_col=time_col,
         )
 
         engine = PotatOptEngine(
@@ -151,6 +162,40 @@ def auto_analyze(data: str | pd.DataFrame, target: str, cost_scrap: float = 500.
             engine.save(save_to)
             report["saved_to"] = save_to
 
+        if group_col is not None:
+            strategy = "group"
+        elif time_col is not None:
+            strategy = "time"
+        else:
+            strategy = "random"
+
+        test_groups_val: list[Any] | None = None
+        if group_col is not None:
+            test_group_raw = frame.loc[y_test.index, group_col].dropna().unique()
+            try:
+                sorted_test_groups = sorted(test_group_raw)
+            except TypeError:
+                sorted_test_groups = sorted(test_group_raw, key=str)
+
+            clean_groups = []
+            for g in sorted_test_groups:
+                if hasattr(g, "item"):
+                    g = g.item()
+                clean_groups.append(g if isinstance(g, (int, float, str, bool)) else str(g))
+
+            if len(clean_groups) > 50:
+                rem = len(clean_groups) - 50
+                test_groups_val = clean_groups[:50] + [f"... and {rem} more"]
+            else:
+                test_groups_val = clean_groups
+
+        test_class_balance_warning: str | None = None
+        if engine.task == "classification" and pd.Series(y_test).nunique() < 2:
+            test_class_balance_warning = (
+                f"Test partition contains fewer than two classes (found {pd.Series(y_test).nunique()}); "
+                f"a rare failure mode may have landed entirely on one side due to non-stratified splitting."
+            )
+
         report.update({
             "ok": True,
             "task": engine.task,
@@ -166,6 +211,11 @@ def auto_analyze(data: str | pd.DataFrame, target: str, cost_scrap: float = 500.
                 "train": len(X_train),
                 "validation": len(X_val),
                 "test": len(X_test),
+                "strategy": strategy,
+                "group_col": group_col,
+                "time_col": time_col,
+                "test_groups": test_groups_val,
+                "test_class_balance_warning": test_class_balance_warning,
             },
             "model": {
                 "name": metrics.get("best_model_name"),
