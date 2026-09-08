@@ -11,7 +11,7 @@ only *what* changed makes the same mistake easy to reintroduce.
 
 ---
 
-## [1.8.0] - 2026-09-08
+## [1.7.1] - 2026-09-08
 
 Everything the library did up to here treated a DataFrame as a pile of
 independent rows. For condition-based maintenance that is wrong twice over: the
@@ -20,6 +20,12 @@ level. This release adds the module that knows rows have an order, teaches the
 splitter that "a machine I have never seen" and "a month that has not happened"
 are different questions, and stops `calculate_mtbf()` reporting a failure rate it
 is not always entitled to.
+
+**On the version number:** this release adds public API - a module, four
+functions, three constants and new keyword arguments - and is numbered as a
+patch rather than a minor. Anything pinned to `~=1.7.0` will therefore receive
+it. Nothing here changes an existing call's result, but the addition is real
+and the number does not advertise it.
 
 **Figures below were measured through the shipped functions**, over 300 trials
 per cell at the shipped default of 500 bootstrap resamples, with explicit integer
