@@ -7,7 +7,7 @@
 [![Hardware](https://img.shields.io/badge/Hardware-CPU--Friendly%20(No%20GPU%20Required)-yellow.svg)]()
 [![Compliance](https://img.shields.io/badge/Security-ISO%209001%20SHA--256%20Anti--Tamper-red.svg)]()
 
-> **"PotatOps"** — Production-Grade, Zero-Code AutoML & Statistical Engine สำหรับ **วิศวกรรมอุตสาหการ (Industrial Engineering)** ที่นำข้อมูลเซนเซอร์จากเครื่องจักรต่างๆ ในสายการผลิตมาวิเคราะห์และวางแผน **Preventive / Predictive Maintenance (PdM)** — ตรวจจับความผิดปกติและแนวโน้มการเสื่อมสภาพของเครื่องจักรก่อนเกิดความเสียหาย โดยประมวลผลได้บนเครื่องคอมพิวเตอร์สเปกจำกัด (Potato Hardware / Edge Devices) ไม่ต้องพึ่งพา GPU
+> **"PotatOpt"** — Production-Grade, Zero-Code AutoML & Statistical Engine สำหรับ **วิศวกรรมอุตสาหการ (Industrial Engineering)** ที่วิเคราะห์และวางแผน **Preventive / Predictive Maintenance (PdM)** จากข้อมูลที่โรงงานมีจริง — ถ้ามีเซนเซอร์ใช้ตรวจจับความผิดปกติและแนวโน้มการเสื่อมสภาพ ถ้ามีแค่ใบแจ้งซ่อม ใช้ MTBF/MTTR, แนวโน้มอัตราการเสีย (Crow-AMSAA), การสึกหรอ (Weibull), การพยากรณ์การเสีย และรอบ PM โดยประมวลผลได้บนเครื่องคอมพิวเตอร์สเปกจำกัด (Potato Hardware / Edge Devices) ไม่ต้องพึ่งพา GPU
 
 ---
 
@@ -580,6 +580,36 @@ PSI สำหรับคอลัมน์เชิงกลุ่ม `calculat
 - `confidence` นอกช่วง (0,1) **ถูกปฏิเสธ ไม่ถูกแทนที่เงียบๆ** เพราะการแทนค่าเริ่มต้นให้จะทำให้ช่วงที่คืนมาหมายความคนละอย่างกับที่ผู้เรียกขอ และไม่มีอะไรปลายทางจับได้
 - ข้อมูลน้อยกว่า `min_intervals` คืน `beta: None` พร้อม `reason` ที่บอกว่าต้องเก็บเพิ่มเท่าไหร่ ไม่ raise
 
+
+#### วางแผนจากใบแจ้งซ่อมอย่างเดียว ไม่ต้องมีเซนเซอร์ (เพิ่มใน v1.8.0)
+
+ห้าฟังก์ชันนี้สร้างมาเพื่อโรงงานที่มีแค่ประวัติแจ้งซ่อม — ใช้เวลาปฏิทินเป็นนาฬิกา เพราะใบแจ้งซ่อมไม่มีชั่วโมงเดินเครื่อง
+
+#### `calculate_crow_amsaa(failure_times, observation_end, confidence=0.95, min_failures=5) -> dict`
+ทดสอบว่าอัตราการเสีย**แย่ลง ดีขึ้น หรือไม่เปลี่ยน** (NHPP / Crow-AMSAA) จากเวลาที่เสียสะสมของเครื่องเดียว
+- คืน `trend` เป็น `"worsening"`, `"improving"` หรือ `"no_evidence"` พร้อม `beta`, `beta_ci_lower`, `beta_ci_upper`, `current_mtbf`
+- ช่วงความเชื่อมั่นเป็นแบบ exact บนเครื่องที่อัตราคงที่จึงเตือนผิดที่ระดับ 5% ตามที่ประกาศ — เทสต์บังคับให้อยู่ใน 3–7% จาก 2,000 รอบ
+- เหตุการณ์น้อยกว่า `CROW_AMSAA_MIN_FAILURES` (5) คืน `trend: None` พร้อม `reason` ไม่เดา
+
+#### `forecast_failure_count(n_failures, lookback, horizon, interval=0.8) -> dict`
+คาดการณ์จำนวนครั้งที่จะเสียในช่วงถัดไปแบบ Poisson: `expected = n_failures / lookback * horizon`
+- คืน `expected`, `lower`, `upper`, `prob_at_least_one`, `rate`
+- ช่วงคาดการณ์ครอบเฉพาะความแปรปรวนแบบ Poisson ไม่รวมความไม่แน่นอนของอัตราเอง
+
+#### `calculate_optimal_pm_interval(beta, eta, cost_planned, cost_breakdown, min_saving_fraction=0.05) -> dict`
+หารอบ PM ที่คุ้มที่สุดแบบ age replacement จากผล Weibull และอัตราส่วนต้นทุน
+- แนะนำ (`worthwhile: True`) **เฉพาะ** เมื่อ `beta > 1` (สึกหรอตามอายุ) **และ**ประหยัดกว่าปล่อยให้เสียอย่างน้อย `min_saving_fraction` (5%)
+- คืน `interval`, `saving_fraction`, `prob_failure_before_pm`, `cost_rate`, `cost_rate_run_to_failure` และ `reason` เสมอ
+
+#### `calculate_weibull_curves(beta, eta, points=80, t_max=None) -> dict` และ `calculate_pm_cost_curve(beta, eta, cost_planned, cost_breakdown, points=80) -> dict`
+คืนเส้นกราฟเบื้องหลังคำตอบข้างบน (`reliability`, `hazard`, `pdf` / `cost_rate`, `run_to_failure_rate`) สำหรับวาดกราฟ ไม่คำนวณคำตอบใหม่
+
+```python
+trend = po.calculate_crow_amsaa(failure_hours, observation_end=3000.0)
+next_month = po.forecast_failure_count(n_failures=12, lookback=180.0, horizon=30.0)
+pm = po.calculate_optimal_pm_interval(beta=2.5, eta=100, cost_planned=1, cost_breakdown=5)
+```
+
 ---
 
 ### 2. PotatOptEngine — Constructor & Public Methods
@@ -1097,7 +1127,7 @@ PotatOpt ออกแบบมาเพื่อเป็นเครื่อ�
 ├── examples/             # quickstart.py + ตัวโหลดชุดข้อมูล AI4I 2020
 ├── benchmarks/           # วัด "ค่าเขียน" (token) และ "ค่ารัน" (RAM/เวลา/เงิน)
 ├── scripts/              # verify_core_install.py พิสูจน์คำเคลม Core 4 แพ็กเกจ
-├── tests/                # ชุดทดสอบอัตโนมัติ (511 เคส)
+├── tests/                # ชุดทดสอบอัตโนมัติ (530 เคส)
 ├── pyproject.toml        # Packaging + Optional Extras + การตั้งค่า ruff
 ├── requirements.txt      # Core & Ecosystem Dependencies (รวม Dev Tools)
 ├── README.md             # เอกสารฉบับภาษาอังกฤษ
@@ -1112,7 +1142,7 @@ PotatOpt ออกแบบมาเพื่อเป็นเครื่อ�
 
 ### การรันชุดทดสอบ (Running the tests)
 
-ทดสอบการทำงานของระบบทั้งหมด (511 tests) ด้วยคำสั่ง:
+ทดสอบการทำงานของระบบทั้งหมด (530 tests) ด้วยคำสั่ง:
 ```bash
 python -m pytest tests/ -q
 ```
