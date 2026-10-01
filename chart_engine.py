@@ -389,8 +389,10 @@ def plot_correlation_heatmap(
                 mat[i, j] = float(val)
 
     masked_mat = np.ma.array(mat, mask=mask)
+    # `with_extremes` returns a new colormap rather than mutating in place; `set_bad` does
+    # the same job but matplotlib 3.11 marks it for removal.
     cmap = mcolors.LinearSegmentedColormap.from_list("potatopt_corr", [ACCENT, PAPER, ALERT])
-    cmap.set_bad(color=PAPER)
+    cmap = cmap.with_extremes(bad=PAPER)
 
     figure, axes = _canvas(max(6.0, min(10.0, 3.5 + n * 0.45)), max(5.0, min(9.0, 3.0 + n * 0.45)))
     axes.grid(False)

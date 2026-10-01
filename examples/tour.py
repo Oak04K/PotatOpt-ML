@@ -413,6 +413,31 @@ def main() -> dict[str, Any]:
     print(f"MTBF states its assumption: failure_rate_assumes_constant_hazard = "
           f"{mtbf_res['failure_rate_assumes_constant_hazard']}")
 
+    # Planning from the same repair log: is the rate changing, what will next month
+    # bring, and does a fixed PM interval pay for itself at a 5:1 breakdown cost?
+    trend_res = po.calculate_crow_amsaa(wear_out_hours[wear_out_hours <= 3000.0], observation_end=3000.0)
+    forecast_res = po.forecast_failure_count(n_failures=12, lookback=180.0, horizon=30.0)
+    pm_res = po.calculate_optimal_pm_interval(
+        beta=weibull_res["beta"], eta=weibull_res["eta"], cost_planned=1.0, cost_breakdown=5.0
+    )
+    curves_res = po.calculate_weibull_curves(beta=weibull_res["beta"], eta=weibull_res["eta"])
+    cost_curve_res = po.calculate_pm_cost_curve(
+        beta=weibull_res["beta"], eta=weibull_res["eta"], cost_planned=1.0, cost_breakdown=5.0
+    )
+    results["calculate_crow_amsaa"] = trend_res
+    results["forecast_failure_count"] = forecast_res
+    results["calculate_optimal_pm_interval"] = pm_res
+    results["calculate_weibull_curves"] = curves_res
+    results["calculate_pm_cost_curve"] = cost_curve_res
+    print(f"Crow-AMSAA trend        : {trend_res['trend']} (beta {trend_res['beta']})")
+    print(f"Next 30 days forecast   : {forecast_res['expected']:.1f} "
+          f"[{forecast_res['lower']}, {forecast_res['upper']}] breakdowns")
+    print(f"Optimal PM interval     : {pm_res['interval']} hrs, worthwhile = {pm_res['worthwhile']}")
+    print(f"Weibull curves grid     : {len(curves_res['t'])} points up to {curves_res['t_max']:.1f} hrs, "
+          f"hazard {curves_res['hazard_shape']}")
+    print(f"PM cost curve grid      : {len(cost_curve_res['t'])} points, "
+          f"run-to-failure rate {cost_curve_res['run_to_failure_rate']:.4f}")
+
     # =========================================================================
     # SECTION 7: Are the rows a sequence rather than a pile?
     # =========================================================================
@@ -656,7 +681,7 @@ def main() -> dict[str, Any]:
     print()
     print("Next steps - what is outside this single-file tour:")
     print("1. `chart_engine.py`: Publication-ready visual figures for SPC charts, EWMA, CUSUM, Pareto, and feature attributions.")
-    print("3. `potatopt.mcp_server`: FastMCP server exposing this entire pipeline as tools for AI agents and LLM pair programmers.")
+    print("2. `potatopt.mcp_server`: An MCP server exposing this pipeline as tools for AI agents.")
 
     return results
 

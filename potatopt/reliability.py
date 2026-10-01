@@ -5,15 +5,29 @@ from typing import Any  # loose return-type annotations for JSON-shaped dicts
 
 import numpy as np  # arrays + math for SPC/EWMA/CUSUM limits, downcasting, anomaly scoring
 import pandas as pd  # DataFrame/Series is the data contract for every public function
-from scipy.optimize import brentq  # scalar root for the Weibull shape
-from scipy.special import gamma  # Weibull MTTF
-from scipy.stats import norm, weibull_min  # Wilson interval; hazard fit
+from scipy.optimize import (  # Weibull shape root; age-replacement optimum
+    brentq,
+    minimize_scalar,
+)
+from scipy.special import (  # Weibull MTTF; incomplete gamma for age replacement
+    gamma,
+    gammainc,
+)
+from scipy.stats import (  # Wilson interval; hazard fit; Crow-AMSAA; Poisson forecast
+    chi2,
+    norm,
+    poisson,
+    weibull_min,
+)
 
 from ._utils import _is_numeric_series, _require_frame
 from .constants import (
+    CROW_AMSAA_MIN_FAILURES,
     DEFAULT_RANDOM_STATE,
+    FORECAST_INTERVAL_DEFAULT,
     OEE_WORLD_CLASS,
     PARETO_CUTOFF,
+    PM_MIN_SAVING_FRACTION,
     WEIBULL_BOOTSTRAP_DEFAULT,
     WEIBULL_CI_CONFIDENCE,
     WEIBULL_MIN_INTERVALS,
@@ -950,5 +964,903 @@ def calculate_weibull(
         "small_sample_warning": small_sample_warning,
         "confidence": conf,
         "reason": reason,
+        "error": None,
+    }
+
+
+def calculate_crow_amsaa(
+    failure_times: Any,
+    observation_end: float,
+    confidence: float = WEIBULL_CI_CONFIDENCE,
+    min_failures: int = CROW_AMSAA_MIN_FAILURES,
+) -> dict[str, Any]:
+    """
+    Assess whether a repairable machine's failure rate is improving, worsening,
+    or constant over time using a power-law Non-Homogeneous Poisson Process (NHPP).
+
+    Models cumulative failure events in a time-truncated observation window
+    (0, observation_end]. The shape parameter beta indicates the trend:
+    beta < 1 implies reliability growth (improving), beta > 1 implies wear-out /
+    deterioration (worsening), and beta = 1 represents a homogeneous Poisson process.
+    An exact conditional confidence interval is computed via Chi-square quantiles.
+
+    Parameters:
+    -----------
+    failure_times : array-like
+        Cumulative arrival times of failure events measured from the start of the
+        observation window.
+    observation_end : float
+        End of the observation window (same time units as failure_times). Must be > 0.
+    confidence : float, default=WEIBULL_CI_CONFIDENCE (0.95)
+        Two-sided confidence level for the exact conditional interval on beta.
+        Must be strictly between 0 and 1.
+    min_failures : int, default=CROW_AMSAA_MIN_FAILURES (5)
+        Minimum count of valid failure times required to estimate parameters.
+
+    Returns:
+    --------
+    dict:
+        JSON-ready diagnostic dictionary containing:
+        - "beta": maximum likelihood estimate of the NHPP shape parameter, or None
+        - "beta_unbiased": time-truncated bias-corrected shape ((n - 1) / n * beta), or None
+        - "lambda_": scale / intensity parameter (failures per unit time^beta), or None
+        - "beta_ci_lower": lower exact conditional confidence limit, or None
+        - "beta_ci_upper": upper exact conditional confidence limit, or None
+        - "trend": "improving", "worsening", "no_evidence", or None on refusal
+        - "current_mtbf": instantaneous MTBF (1 / intensity) at observation_end, or None
+        - "n_failures": count of valid failure times analyzed
+        - "observation_end": echoed observation window endpoint, or None on invalid input
+        - "dropped": count of non-positive, non-finite, or out-of-window values excluded
+        - "confidence": echoed confidence level, or None on invalid input
+        - "reason": plain-language summary of the trend verdict and confidence bounds
+        - "error": error message on refusal, None on success
+    """
+    if isinstance(confidence, bool):
+        return {
+            "beta": None, "beta_unbiased": None, "lambda_": None,
+            "beta_ci_lower": None, "beta_ci_upper": None, "trend": None,
+            "current_mtbf": None, "n_failures": 0, "observation_end": None,
+            "dropped": 0, "confidence": None,
+            "reason": f"confidence must be strictly between 0 and 1, got {confidence!r}.",
+            "error": f"confidence must be strictly between 0 and 1, got {confidence!r}.",
+        }
+    try:
+        conf = float(confidence)
+        if not (0.0 < conf < 1.0) or not math.isfinite(conf):
+            return {
+                "beta": None, "beta_unbiased": None, "lambda_": None,
+                "beta_ci_lower": None, "beta_ci_upper": None, "trend": None,
+                "current_mtbf": None, "n_failures": 0, "observation_end": None,
+                "dropped": 0, "confidence": conf if math.isfinite(conf) else None,
+                "reason": f"confidence must be strictly between 0 and 1, got {confidence!r}.",
+                "error": f"confidence must be strictly between 0 and 1, got {confidence!r}.",
+            }
+    except (ValueError, TypeError):
+        return {
+            "beta": None, "beta_unbiased": None, "lambda_": None,
+            "beta_ci_lower": None, "beta_ci_upper": None, "trend": None,
+            "current_mtbf": None, "n_failures": 0, "observation_end": None,
+            "dropped": 0, "confidence": None,
+            "reason": f"confidence must be a float in (0, 1), got {confidence!r}.",
+            "error": f"confidence must be a float in (0, 1), got {confidence!r}.",
+        }
+
+    if isinstance(observation_end, bool):
+        return {
+            "beta": None, "beta_unbiased": None, "lambda_": None,
+            "beta_ci_lower": None, "beta_ci_upper": None, "trend": None,
+            "current_mtbf": None, "n_failures": 0, "observation_end": None,
+            "dropped": 0, "confidence": conf,
+            "reason": f"observation_end must be finite and > 0, got {observation_end!r}.",
+            "error": f"observation_end must be finite and > 0, got {observation_end!r}.",
+        }
+    try:
+        obs_end = float(observation_end)
+        if not (obs_end > 0.0) or not math.isfinite(obs_end):
+            return {
+                "beta": None, "beta_unbiased": None, "lambda_": None,
+                "beta_ci_lower": None, "beta_ci_upper": None, "trend": None,
+                "current_mtbf": None, "n_failures": 0,
+                "observation_end": obs_end if math.isfinite(obs_end) else None,
+                "dropped": 0, "confidence": conf,
+                "reason": f"observation_end must be finite and > 0, got {observation_end!r}.",
+                "error": f"observation_end must be finite and > 0, got {observation_end!r}.",
+            }
+    except (ValueError, TypeError):
+        return {
+            "beta": None, "beta_unbiased": None, "lambda_": None,
+            "beta_ci_lower": None, "beta_ci_upper": None, "trend": None,
+            "current_mtbf": None, "n_failures": 0, "observation_end": None,
+            "dropped": 0, "confidence": conf,
+            "reason": f"observation_end must be a number > 0, got {observation_end!r}.",
+            "error": f"observation_end must be a number > 0, got {observation_end!r}.",
+        }
+
+    if isinstance(min_failures, bool):
+        min_f = CROW_AMSAA_MIN_FAILURES
+    else:
+        try:
+            min_f = int(min_failures)
+            if min_f < 1:
+                min_f = CROW_AMSAA_MIN_FAILURES
+        except (ValueError, TypeError):
+            min_f = CROW_AMSAA_MIN_FAILURES
+
+    if isinstance(failure_times, bool):
+        return {
+            "beta": None, "beta_unbiased": None, "lambda_": None,
+            "beta_ci_lower": None, "beta_ci_upper": None, "trend": None,
+            "current_mtbf": None, "n_failures": 0, "observation_end": obs_end,
+            "dropped": 0, "confidence": conf,
+            "reason": f"failure_times cannot be a boolean: {failure_times!r}.",
+            "error": "failure_times must be an array-like sequence of numbers.",
+        }
+    try:
+        arr = np.asarray(failure_times, dtype=float).ravel()
+    except (ValueError, TypeError):
+        return {
+            "beta": None, "beta_unbiased": None, "lambda_": None,
+            "beta_ci_lower": None, "beta_ci_upper": None, "trend": None,
+            "current_mtbf": None, "n_failures": 0, "observation_end": obs_end,
+            "dropped": 0, "confidence": conf,
+            "reason": f"failure_times could not be converted to a numeric array: {failure_times!r}.",
+            "error": "failure_times must be an array-like sequence of numbers.",
+        }
+
+    valid_mask = np.isfinite(arr) & (arr > 0.0) & (arr <= obs_end)
+    kept = arr[valid_mask]
+    dropped = int(len(arr) - len(kept))
+    n = len(kept)
+
+    if n < min_f:
+        return {
+            "beta": None,
+            "beta_unbiased": None,
+            "lambda_": None,
+            "beta_ci_lower": None,
+            "beta_ci_upper": None,
+            "trend": None,
+            "current_mtbf": None,
+            "n_failures": n,
+            "observation_end": obs_end,
+            "dropped": dropped,
+            "confidence": conf,
+            "reason": (
+                f"Crow-AMSAA requires at least {min_f} failure events to report a trend, "
+                f"but only {n} valid event(s) were found (dropped {dropped})."
+            ),
+            "error": f"Crow-AMSAA requires at least {min_f} failures, found {n} (dropped {dropped}).",
+        }
+
+    log_ratios = np.log(obs_end / kept)
+    s_val = float(np.sum(log_ratios))
+    if not math.isfinite(s_val) or s_val <= 0.0:
+        return {
+            "beta": None,
+            "beta_unbiased": None,
+            "lambda_": None,
+            "beta_ci_lower": None,
+            "beta_ci_upper": None,
+            "trend": None,
+            "current_mtbf": None,
+            "n_failures": n,
+            "observation_end": obs_end,
+            "dropped": dropped,
+            "confidence": conf,
+            "reason": "All failure times occur at the observation window boundary; beta cannot be computed.",
+            "error": "Sum of log(observation_end / t) is <= 0 (all failures at window end).",
+        }
+
+    beta = float(n / s_val)
+    lam = float(n / (obs_end ** beta))
+    beta_unbiased = float(((n - 1) / n) * beta)
+
+    alpha = 1.0 - conf
+    lower = float(chi2.ppf(alpha / 2.0, 2 * n) / (2.0 * s_val))
+    upper = float(chi2.ppf(1.0 - alpha / 2.0, 2 * n) / (2.0 * s_val))
+
+    if lower > 1.0:
+        trend = "worsening"
+    elif upper < 1.0:
+        trend = "improving"
+    else:
+        trend = "no_evidence"
+
+    try:
+        current_intensity = float(lam * beta * (obs_end ** (beta - 1.0)))
+        if current_intensity > 0.0 and math.isfinite(current_intensity):
+            current_mtbf = float(1.0 / current_intensity)
+        else:
+            current_mtbf = None
+    except (OverflowError, ValueError):
+        current_mtbf = None
+
+    conf_pct = f"{conf * 100:.0f}%" if (conf * 100).is_integer() else f"{conf * 100:.1f}%"
+    if trend == "worsening":
+        reason = (
+            f"Failures are arriving faster over time "
+            f"(beta {beta:.2f}, {conf_pct} CI {lower:.2f}-{upper:.2f} excludes 1)."
+        )
+    elif trend == "improving":
+        reason = (
+            f"Failures are arriving slower over time "
+            f"(beta {beta:.2f}, {conf_pct} CI {lower:.2f}-{upper:.2f} excludes 1)."
+        )
+    else:
+        reason = (
+            f"No evidence the failure rate is changing "
+            f"({conf_pct} CI {lower:.2f}-{upper:.2f} contains 1). "
+            f"This is not proof it is constant - with few failures the test has little power."
+        )
+
+    return {
+        "beta": beta,
+        "beta_unbiased": beta_unbiased,
+        "lambda_": lam,
+        "beta_ci_lower": lower,
+        "beta_ci_upper": upper,
+        "trend": trend,
+        "current_mtbf": current_mtbf,
+        "n_failures": n,
+        "observation_end": obs_end,
+        "dropped": dropped,
+        "confidence": conf,
+        "reason": reason,
+        "error": None,
+    }
+
+
+def forecast_failure_count(
+    n_failures: int,
+    lookback: float,
+    horizon: float,
+    interval: float = FORECAST_INTERVAL_DEFAULT,
+) -> dict[str, Any]:
+    """
+    Forecast the number of failure events in a future time horizon based on
+    a historical lookback window, under a homogeneous Poisson process assumption.
+
+    Parameters:
+    -----------
+    n_failures : int
+        Number of failures observed during the lookback window. Must be an integer >= 0.
+    lookback : float
+        Length of the historical observation window. Must be finite and > 0.
+    horizon : float
+        Length of the forward forecast horizon. Must be finite and > 0.
+    interval : float, default=FORECAST_INTERVAL_DEFAULT (0.80)
+        Central coverage probability for the Poisson prediction interval.
+        Must be strictly between 0 and 1.
+
+    Returns:
+    --------
+    dict:
+        JSON-ready diagnostic dictionary containing:
+        - "expected": expected number of failures in the horizon (rate * horizon), or None
+        - "lower": lower integer bound of the Poisson forecast interval, or None
+        - "upper": upper integer bound of the Poisson forecast interval, or None
+        - "interval": echoed central interval coverage, or None on invalid input
+        - "rate": historical failure rate per unit time (n_failures / lookback), or None
+        - "prob_at_least_one": probability of observing >= 1 failure (1 - exp(-expected)), or None
+        - "n_failures": echoed historical failure count, or None on invalid input
+        - "lookback": echoed lookback duration, or None on invalid input
+        - "horizon": echoed forecast horizon duration, or None on invalid input
+        - "distribution": list of {"k": int, "probability": float} up to max(upper + 2, 4), or [] on error
+        - "note": plain-language advisory on Poisson noise and rate uncertainty
+        - "error": error message on refusal, None on success
+    """
+    if isinstance(n_failures, bool):
+        return {
+            "expected": None, "lower": None, "upper": None, "interval": None,
+            "rate": None, "prob_at_least_one": None, "n_failures": None,
+            "lookback": None, "horizon": None,
+            "distribution": [],
+            "note": "n_failures must be an integer >= 0, got boolean.",
+            "error": f"n_failures must be an integer >= 0, got {n_failures!r}.",
+        }
+
+    try:
+        if isinstance(n_failures, (int, np.integer)):
+            if n_failures < 0:
+                raise ValueError(f"n_failures must be >= 0, got {n_failures}")
+            n_f = int(n_failures)
+        elif isinstance(n_failures, (float, np.floating)):
+            if not math.isfinite(n_failures) or n_failures < 0.0 or not float(n_failures).is_integer():
+                raise ValueError(f"n_failures must be a finite whole number >= 0, got {n_failures}")
+            n_f = int(n_failures)
+        else:
+            raise TypeError(f"n_failures must be an integer >= 0, got {type(n_failures).__name__}")
+    except (ValueError, TypeError) as err:
+        return {
+            "expected": None, "lower": None, "upper": None, "interval": None,
+            "rate": None, "prob_at_least_one": None, "n_failures": None,
+            "lookback": None, "horizon": None,
+            "distribution": [],
+            "note": str(err),
+            "error": str(err),
+        }
+
+    if isinstance(lookback, bool):
+        return {
+            "expected": None, "lower": None, "upper": None, "interval": None,
+            "rate": None, "prob_at_least_one": None, "n_failures": n_f,
+            "lookback": None, "horizon": None,
+            "distribution": [],
+            "note": "lookback must be a positive number, got boolean.",
+            "error": f"lookback must be a positive number, got {lookback!r}.",
+        }
+    try:
+        lb = float(lookback)
+        if not math.isfinite(lb) or lb <= 0.0:
+            raise ValueError(f"lookback must be finite and > 0, got {lookback!r}")
+    except (ValueError, TypeError) as err:
+        return {
+            "expected": None, "lower": None, "upper": None, "interval": None,
+            "rate": None, "prob_at_least_one": None, "n_failures": n_f,
+            "lookback": None, "horizon": None,
+            "distribution": [],
+            "note": str(err),
+            "error": str(err),
+        }
+
+    if isinstance(horizon, bool):
+        return {
+            "expected": None, "lower": None, "upper": None, "interval": None,
+            "rate": None, "prob_at_least_one": None, "n_failures": n_f,
+            "lookback": lb, "horizon": None,
+            "distribution": [],
+            "note": "horizon must be a positive number, got boolean.",
+            "error": f"horizon must be a positive number, got {horizon!r}.",
+        }
+    try:
+        hz = float(horizon)
+        if not math.isfinite(hz) or hz <= 0.0:
+            raise ValueError(f"horizon must be finite and > 0, got {horizon!r}")
+    except (ValueError, TypeError) as err:
+        return {
+            "expected": None, "lower": None, "upper": None, "interval": None,
+            "rate": None, "prob_at_least_one": None, "n_failures": n_f,
+            "lookback": lb, "horizon": None,
+            "distribution": [],
+            "note": str(err),
+            "error": str(err),
+        }
+
+    if isinstance(interval, bool):
+        return {
+            "expected": None, "lower": None, "upper": None, "interval": None,
+            "rate": None, "prob_at_least_one": None, "n_failures": n_f,
+            "lookback": lb, "horizon": hz,
+            "distribution": [],
+            "note": "interval must be strictly between 0 and 1, got boolean.",
+            "error": f"interval must be strictly between 0 and 1, got {interval!r}.",
+        }
+    try:
+        inv = float(interval)
+        if not math.isfinite(inv) or not (0.0 < inv < 1.0):
+            raise ValueError(f"interval must be strictly between 0 and 1, got {interval!r}")
+    except (ValueError, TypeError) as err:
+        return {
+            "expected": None, "lower": None, "upper": None, "interval": None,
+            "rate": None, "prob_at_least_one": None, "n_failures": n_f,
+            "lookback": lb, "horizon": hz,
+            "distribution": [],
+            "note": str(err),
+            "error": str(err),
+        }
+
+    rate = float(n_f / lb)
+    expected = float(rate * hz)
+
+    if expected == 0.0:
+        lower = 0
+        upper = 0
+    else:
+        alpha_half = (1.0 - inv) / 2.0
+        lower = int(max(0, poisson.ppf(alpha_half, expected)))
+        upper = int(max(0, poisson.ppf(1.0 - alpha_half, expected)))
+
+    prob_at_least_one = float(1.0 - math.exp(-expected))
+
+    k_max = max(upper + 2, 4)
+    distribution: list[dict[str, Any]] = []
+    if expected == 0.0:
+        distribution.append({"k": 0, "probability": 1.0})
+        for k in range(1, k_max + 1):
+            distribution.append({"k": int(k), "probability": 0.0})
+    else:
+        for k in range(k_max + 1):
+            distribution.append({"k": int(k), "probability": float(poisson.pmf(k, expected))})
+
+    if n_f == 0:
+        note = (
+            "No failures in the lookback window. A zero forecast is not a zero risk - "
+            "the window may simply be too short."
+        )
+    else:
+        note = (
+            "The interval covers Poisson noise only, not uncertainty in the rate itself, "
+            "so it is narrower than the truth when the lookback holds few failures."
+        )
+
+    return {
+        "expected": expected,
+        "lower": lower,
+        "upper": upper,
+        "interval": inv,
+        "rate": rate,
+        "prob_at_least_one": prob_at_least_one,
+        "distribution": distribution,
+        "n_failures": n_f,
+        "lookback": lb,
+        "horizon": hz,
+        "note": note,
+        "error": None,
+    }
+
+
+def _age_replacement_cost_rate(
+    t: float,
+    beta: float,
+    eta: float,
+    cost_planned: float,
+    cost_breakdown: float,
+) -> float:
+    """Evaluate long-run cost per unit time under an age replacement policy at interval t."""
+    if t <= 0.0:
+        return float("inf")
+    scaled = t / eta
+    z = scaled ** beta
+    if z > 700.0:
+        r_t = 0.0
+        ginc = 1.0
+    else:
+        r_t = math.exp(-z)
+        ginc = float(gammainc(1.0 / beta, z))
+    m_t = (eta / beta) * gamma(1.0 / beta) * ginc
+    if m_t <= 0.0:
+        return float("inf")
+    return float((cost_planned * r_t + cost_breakdown * (1.0 - r_t)) / m_t)
+
+
+def calculate_optimal_pm_interval(
+    beta: float,
+    eta: float,
+    cost_planned: float,
+    cost_breakdown: float,
+    min_saving_fraction: float = PM_MIN_SAVING_FRACTION,
+) -> dict[str, Any]:
+    """
+    Calculate the cost-optimal Preventive Maintenance (PM) age-replacement interval
+    for equipment subject to Weibull(beta, eta) failure behavior.
+
+    Under an age-replacement policy, the asset is replaced/serviced upon reaching
+    operating age T (at cost_planned) or upon failure (at cost_breakdown), whichever
+    comes first. Each replacement restores the asset to as-good-as-new condition.
+    An optimal replacement schedule exists only when equipment exhibits wear-out
+    (beta > 1) and breakdown cost exceeds planned replacement cost.
+
+    Parameters:
+    -----------
+    beta : float
+        Weibull shape parameter. Must be finite and > 0.
+    eta : float
+        Weibull scale parameter (characteristic life). Must be finite and > 0.
+    cost_planned : float
+        Cost of scheduled preventive maintenance or replacement. Must be finite and > 0.
+    cost_breakdown : float
+        Total cost of an unplanned breakdown / reactive replacement. Must be finite and > 0.
+    min_saving_fraction : float, default=PM_MIN_SAVING_FRACTION (0.05)
+        Minimum relative cost rate reduction versus run-to-failure required to
+        declare the preventive policy worthwhile.
+
+    Returns:
+    --------
+    dict:
+        JSON-ready diagnostic dictionary containing:
+        - "interval": optimal PM age replacement interval T*, or None
+        - "cost_rate": long-run cost per unit time under the optimal policy C(T*), or None
+        - "cost_rate_run_to_failure": long-run cost per unit time under run-to-failure, or None
+        - "saving_fraction": relative cost rate reduction 1 - C(T*) / C_rtf, or None
+        - "prob_failure_before_pm": probability of breakdown before reaching PM age, or None
+        - "worthwhile": True if PM saves >= min_saving_fraction and optimum is within search bounds
+        - "beta": echoed Weibull shape parameter, or None on invalid input
+        - "eta": echoed Weibull scale parameter, or None on invalid input
+        - "cost_ratio": ratio of breakdown cost to planned cost, or None on invalid input
+        - "reason": plain-language advisory explaining the recommendation
+        - "error": error message on refusal, None on success
+    """
+    for name, val in [
+        ("beta", beta),
+        ("eta", eta),
+        ("cost_planned", cost_planned),
+        ("cost_breakdown", cost_breakdown),
+    ]:
+        if isinstance(val, bool):
+            return {
+                "interval": None, "cost_rate": None, "cost_rate_run_to_failure": None,
+                "saving_fraction": None, "prob_failure_before_pm": None,
+                "worthwhile": False, "beta": None, "eta": None, "cost_ratio": None,
+                "reason": f"{name} must be a positive number, got boolean.",
+                "error": f"{name} must be finite and > 0, got {val!r}.",
+            }
+
+    try:
+        b = float(beta)
+        e = float(eta)
+        cp = float(cost_planned)
+        cb = float(cost_breakdown)
+        if not (b > 0.0 and math.isfinite(b)):
+            raise ValueError(f"beta must be finite and > 0, got {beta!r}")
+        if not (e > 0.0 and math.isfinite(e)):
+            raise ValueError(f"eta must be finite and > 0, got {eta!r}")
+        if not (cp > 0.0 and math.isfinite(cp)):
+            raise ValueError(f"cost_planned must be finite and > 0, got {cost_planned!r}")
+        if not (cb > 0.0 and math.isfinite(cb)):
+            raise ValueError(f"cost_breakdown must be finite and > 0, got {cost_breakdown!r}")
+    except (ValueError, TypeError) as err:
+        return {
+            "interval": None, "cost_rate": None, "cost_rate_run_to_failure": None,
+            "saving_fraction": None, "prob_failure_before_pm": None,
+            "worthwhile": False, "beta": None, "eta": None, "cost_ratio": None,
+            "reason": str(err),
+            "error": str(err),
+        }
+
+    try:
+        if isinstance(min_saving_fraction, bool):
+            msf = PM_MIN_SAVING_FRACTION
+        else:
+            msf = float(min_saving_fraction)
+            if not math.isfinite(msf) or msf < 0.0:
+                msf = PM_MIN_SAVING_FRACTION
+    except (ValueError, TypeError):
+        msf = PM_MIN_SAVING_FRACTION
+
+    cost_ratio = float(cb / cp)
+    c_rtf = float(cb / (e * gamma(1.0 + 1.0 / b)))
+
+    if b <= 1.0:
+        return {
+            "interval": None,
+            "cost_rate": None,
+            "cost_rate_run_to_failure": c_rtf,
+            "saving_fraction": 0.0,
+            "prob_failure_before_pm": None,
+            "worthwhile": False,
+            "beta": b,
+            "eta": e,
+            "cost_ratio": cost_ratio,
+            "reason": (
+                "The failure rate is not increasing (beta <= 1), so replacing on a "
+                "fixed schedule cannot beat running to failure."
+            ),
+            "error": None,
+        }
+
+    if cb <= cp:
+        return {
+            "interval": None,
+            "cost_rate": None,
+            "cost_rate_run_to_failure": c_rtf,
+            "saving_fraction": 0.0,
+            "prob_failure_before_pm": None,
+            "worthwhile": False,
+            "beta": b,
+            "eta": e,
+            "cost_ratio": cost_ratio,
+            "reason": "A breakdown costs no more than a planned job, so scheduled PM cannot save money.",
+            "error": None,
+        }
+
+    def cost_func(t: float) -> float:
+        return _age_replacement_cost_rate(t, b, e, cp, cb)
+
+    grid = np.geomspace(0.01 * e, 5.0 * e, 400)
+    costs = [cost_func(float(t)) for t in grid]
+    min_idx = int(np.argmin(costs))
+
+    low_idx = max(0, min_idx - 1)
+    high_idx = min(len(grid) - 1, min_idx + 1)
+    bound_low = float(grid[low_idx])
+    bound_high = float(grid[high_idx])
+
+    try:
+        res = minimize_scalar(cost_func, bounds=(bound_low, bound_high), method="bounded")
+        if res.success and math.isfinite(res.x):
+            optimal_interval = float(res.x)
+            cost_rate = float(res.fun)
+        else:
+            optimal_interval = float(grid[min_idx])
+            cost_rate = float(costs[min_idx])
+    except Exception:  # noqa: BLE001 - fallback to best grid point if numerical solver fails
+        optimal_interval = float(grid[min_idx])
+        cost_rate = float(costs[min_idx])
+
+    saving_fraction = float(1.0 - cost_rate / c_rtf)
+    is_last_point = (min_idx == len(grid) - 1)
+    worthwhile = bool((saving_fraction >= msf) and (not is_last_point))
+
+    z_opt = (optimal_interval / e) ** b
+    prob_failure_before_pm = float(1.0 - (0.0 if z_opt > 700.0 else math.exp(-z_opt)))
+
+    if worthwhile:
+        reason = (
+            f"Replace/service every {optimal_interval:.1f} units: "
+            f"long-run cost rate {saving_fraction * 100:.1f}% below running to failure; "
+            f"{prob_failure_before_pm * 100:.1f}% chance of failing before the PM is due."
+        )
+    else:
+        reason = (
+            f"Scheduled PM saves {saving_fraction * 100:.1f}%, which is below the "
+            f"{msf * 100:.1f}% threshold; recommend running to failure."
+        )
+
+    return {
+        "interval": optimal_interval,
+        "cost_rate": cost_rate,
+        "cost_rate_run_to_failure": c_rtf,
+        "saving_fraction": saving_fraction,
+        "prob_failure_before_pm": prob_failure_before_pm,
+        "worthwhile": worthwhile,
+        "beta": b,
+        "eta": e,
+        "cost_ratio": cost_ratio,
+        "reason": reason,
+        "error": None,
+    }
+
+
+def calculate_weibull_curves(
+    beta: float,
+    eta: float,
+    points: int = 80,
+    t_max: float | None = None,
+) -> dict[str, Any]:
+    """
+    Generate evaluation points for Weibull probability density, reliability (survival),
+    and hazard rate curves across a specified time grid.
+
+    Parameters:
+    -----------
+    beta : float
+        Weibull shape parameter. Must be finite and > 0.
+    eta : float
+        Weibull scale parameter (characteristic life). Must be finite and > 0.
+    points : int, default=80
+        Number of grid evaluation points. Must be an integer in [10, 500].
+    t_max : float | None, default=None
+        Maximum evaluation time. If None, defaults to 2.5 * eta. Must be finite and > 0.
+
+    Returns:
+    --------
+    dict:
+        JSON-ready dictionary containing:
+        - "t": list of grid evaluation times from t_max / points to t_max
+        - "pdf": Weibull probability density f(t)
+        - "reliability": Weibull reliability / survival R(t) = P(T > t)
+        - "hazard": Weibull hazard rate h(t) = f(t) / R(t)
+        - "beta": echoed Weibull shape parameter
+        - "eta": echoed Weibull scale parameter
+        - "t_max": maximum evaluation time
+        - "hazard_shape": 'rising' (beta > 1), 'falling' (beta < 1), or 'flat' (beta == 1)
+        - "reason": plain-language summary of the curve characteristics
+        - "error": error message on refusal, None on success
+    """
+    for name, val in [("beta", beta), ("eta", eta)]:
+        if isinstance(val, bool):
+            return {
+                "t": [], "pdf": [], "reliability": [], "hazard": [],
+                "beta": None, "eta": None, "t_max": None, "hazard_shape": None,
+                "reason": f"{name} must be a positive number, got boolean.",
+                "error": f"{name} must be finite and > 0, got {val!r}.",
+            }
+
+    try:
+        b = float(beta)
+        e = float(eta)
+        if not (math.isfinite(b) and b > 0.0):
+            raise ValueError(f"beta must be finite and > 0, got {beta!r}")
+        if not (math.isfinite(e) and e > 0.0):
+            raise ValueError(f"eta must be finite and > 0, got {eta!r}")
+    except (ValueError, TypeError) as err:
+        return {
+            "t": [], "pdf": [], "reliability": [], "hazard": [],
+            "beta": None, "eta": None, "t_max": None, "hazard_shape": None,
+            "reason": str(err),
+            "error": str(err),
+        }
+
+    if isinstance(points, bool):
+        return {
+            "t": [], "pdf": [], "reliability": [], "hazard": [],
+            "beta": None, "eta": None, "t_max": None, "hazard_shape": None,
+            "reason": "points must be an integer in [10, 500], got boolean.",
+            "error": f"points must be an integer in [10, 500], got {points!r}.",
+        }
+
+    try:
+        if isinstance(points, (int, np.integer)) or isinstance(points, (float, np.floating)) and math.isfinite(points) and float(points).is_integer():
+            p = int(points)
+        else:
+            raise TypeError(f"points must be an integer in [10, 500], got {type(points).__name__}")
+        if not (10 <= p <= 500):
+            raise ValueError(f"points must be an integer in [10, 500], got {points!r}")
+    except (ValueError, TypeError) as err:
+        return {
+            "t": [], "pdf": [], "reliability": [], "hazard": [],
+            "beta": None, "eta": None, "t_max": None, "hazard_shape": None,
+            "reason": str(err),
+            "error": str(err),
+        }
+
+    if t_max is None:
+        tm = float(e * 2.5)
+    else:
+        if isinstance(t_max, bool):
+            return {
+                "t": [], "pdf": [], "reliability": [], "hazard": [],
+                "beta": None, "eta": None, "t_max": None, "hazard_shape": None,
+                "reason": "t_max must be a positive number, got boolean.",
+                "error": f"t_max must be finite and > 0, got {t_max!r}.",
+            }
+        try:
+            tm = float(t_max)
+            if not (math.isfinite(tm) and tm > 0.0):
+                raise ValueError(f"t_max must be finite and > 0, got {t_max!r}")
+        except (ValueError, TypeError) as err:
+            return {
+                "t": [], "pdf": [], "reliability": [], "hazard": [],
+                "beta": None, "eta": None, "t_max": None, "hazard_shape": None,
+                "reason": str(err),
+                "error": str(err),
+            }
+
+    t_arr = np.linspace(tm / p, tm, p)
+    t_list = [float(val) for val in t_arr]
+    pdf_list: list[float] = []
+    rel_list: list[float] = []
+    haz_list: list[float] = []
+
+    for val in t_list:
+        scaled = val / e
+        z = scaled ** b
+        rel = float(math.exp(-z)) if z < 700.0 else 0.0
+        haz = float((b / e) * (scaled ** (b - 1.0)))
+        pdf = float(haz * rel)
+        pdf_list.append(pdf)
+        rel_list.append(rel)
+        haz_list.append(haz)
+
+    if b > 1.0:
+        hazard_shape = "rising"
+    elif b < 1.0:
+        hazard_shape = "falling"
+    else:
+        hazard_shape = "flat"
+
+    return {
+        "t": t_list,
+        "pdf": pdf_list,
+        "reliability": rel_list,
+        "hazard": haz_list,
+        "beta": b,
+        "eta": e,
+        "t_max": tm,
+        "hazard_shape": hazard_shape,
+        "reason": f"Weibull curves evaluated at {p} points ({hazard_shape} hazard).",
+        "error": None,
+    }
+
+
+def calculate_pm_cost_curve(
+    beta: float,
+    eta: float,
+    cost_planned: float,
+    cost_breakdown: float,
+    points: int = 80,
+) -> dict[str, Any]:
+    """
+    Calculate the long-run cost rate curve under an age replacement policy
+    across an operating interval grid from 0.05 * eta to 3.0 * eta.
+
+    Parameters:
+    -----------
+    beta : float
+        Weibull shape parameter. Must be finite and > 0.
+    eta : float
+        Weibull scale parameter (characteristic life). Must be finite and > 0.
+    cost_planned : float
+        Cost of scheduled preventive maintenance. Must be finite and > 0.
+    cost_breakdown : float
+        Cost of reactive breakdown repair. Must be finite and > 0.
+    points : int, default=80
+        Number of evaluation points. Must be an integer in [10, 500].
+
+    Returns:
+    --------
+    dict:
+        JSON-ready diagnostic dictionary containing:
+        - "t": list of replacement intervals
+        - "cost_rate": cost per unit time for each interval t
+        - "run_to_failure_rate": cost per unit time under run-to-failure policy
+        - "beta": echoed Weibull shape parameter
+        - "eta": echoed Weibull scale parameter
+        - "cost_ratio": ratio of breakdown cost to planned cost
+        - "reason": summary of the curve
+        - "error": error message on refusal, None on success
+    """
+    for name, val in [
+        ("beta", beta),
+        ("eta", eta),
+        ("cost_planned", cost_planned),
+        ("cost_breakdown", cost_breakdown),
+    ]:
+        if isinstance(val, bool):
+            return {
+                "t": [], "cost_rate": [], "run_to_failure_rate": None,
+                "beta": None, "eta": None, "cost_ratio": None,
+                "reason": f"{name} must be a positive number, got boolean.",
+                "error": f"{name} must be finite and > 0, got {val!r}.",
+            }
+
+    try:
+        b = float(beta)
+        e = float(eta)
+        cp = float(cost_planned)
+        cb = float(cost_breakdown)
+        if not (math.isfinite(b) and b > 0.0):
+            raise ValueError(f"beta must be finite and > 0, got {beta!r}")
+        if not (math.isfinite(e) and e > 0.0):
+            raise ValueError(f"eta must be finite and > 0, got {eta!r}")
+        if not (math.isfinite(cp) and cp > 0.0):
+            raise ValueError(f"cost_planned must be finite and > 0, got {cost_planned!r}")
+        if not (math.isfinite(cb) and cb > 0.0):
+            raise ValueError(f"cost_breakdown must be finite and > 0, got {cost_breakdown!r}")
+    except (ValueError, TypeError) as err:
+        return {
+            "t": [], "cost_rate": [], "run_to_failure_rate": None,
+            "beta": None, "eta": None, "cost_ratio": None,
+            "reason": str(err),
+            "error": str(err),
+        }
+
+    if isinstance(points, bool):
+        return {
+            "t": [], "cost_rate": [], "run_to_failure_rate": None,
+            "beta": None, "eta": None, "cost_ratio": None,
+            "reason": "points must be an integer in [10, 500], got boolean.",
+            "error": f"points must be an integer in [10, 500], got {points!r}.",
+        }
+
+    try:
+        if isinstance(points, (int, np.integer)) or isinstance(points, (float, np.floating)) and math.isfinite(points) and float(points).is_integer():
+            p = int(points)
+        else:
+            raise TypeError(f"points must be an integer in [10, 500], got {type(points).__name__}")
+        if not (10 <= p <= 500):
+            raise ValueError(f"points must be an integer in [10, 500], got {points!r}")
+    except (ValueError, TypeError) as err:
+        return {
+            "t": [], "cost_rate": [], "run_to_failure_rate": None,
+            "beta": None, "eta": None, "cost_ratio": None,
+            "reason": str(err),
+            "error": str(err),
+        }
+
+    cost_ratio = float(cb / cp)
+    c_rtf = float(cb / (e * gamma(1.0 + 1.0 / b)))
+    t_grid = np.linspace(0.05 * e, 3.0 * e, p)
+    t_list = [float(val) for val in t_grid]
+    cost_rate = [_age_replacement_cost_rate(val, b, e, cp, cb) for val in t_list]
+
+    return {
+        "t": t_list,
+        "cost_rate": cost_rate,
+        "run_to_failure_rate": c_rtf,
+        "beta": b,
+        "eta": e,
+        "cost_ratio": cost_ratio,
+        "reason": f"PM cost rate evaluated at {p} points.",
         "error": None,
     }

@@ -33,7 +33,7 @@ Key Architecture Principles:
 
 from __future__ import annotations
 
-__version__ = "1.7.1"
+__version__ = "1.8.0"
 
 from typing import Any
 
@@ -71,6 +71,7 @@ from .constants import (
     CONTROL_RULE_DESCRIPTIONS,
     CONTROL_RULES_NELSON,
     CONTROL_RULES_WESTERN_ELECTRIC,
+    CROW_AMSAA_MIN_FAILURES,
     CUSUM_DEFAULT_DECISION,
     CUSUM_DEFAULT_SLACK,
     DEFAULT_RANDOM_STATE,
@@ -81,6 +82,7 @@ from .constants import (
     DRIFT_NOISE_SIGMAS,
     EWMA_DEFAULT_LAMBDA,
     EWMA_DEFAULT_SIGMAS,
+    FORECAST_INTERVAL_DEFAULT,
     MIN_TRAIN_ROWS,
     MISSING_SCHEMA_WARN_RATIO,
     MODIFIED_ZSCORE_THRESHOLD,
@@ -89,6 +91,7 @@ from .constants import (
     OEE_WORLD_CLASS,
     OUT_OF_BOUNDS_WARN_RATIO,
     PARETO_CUTOFF,
+    PM_MIN_SAVING_FRACTION,
     PSI_DEFAULT_BINS,
     PSI_MAJOR_SHIFT,
     PSI_MAX_CATEGORIES,
@@ -124,13 +127,18 @@ from .quality import (
 )
 from .reliability import (
     calculate_availability,
+    calculate_crow_amsaa,
     calculate_maintenance_savings,
     calculate_mtbf,
     calculate_mttr,
     calculate_oee,
+    calculate_optimal_pm_interval,
     calculate_pareto,
+    calculate_pm_cost_curve,
     calculate_time_between_failures,
     calculate_weibull,
+    calculate_weibull_curves,
+    forecast_failure_count,
     wilson_confidence_interval,
 )
 from .sequence import add_window_features, build_failure_labels
@@ -202,6 +210,11 @@ __all__ = [  # noqa: RUF022
     "calculate_pareto",
     "calculate_time_between_failures",
     "calculate_weibull",
+    "calculate_crow_amsaa",
+    "calculate_optimal_pm_interval",
+    "calculate_pm_cost_curve",
+    "calculate_weibull_curves",
+    "forecast_failure_count",
     # Interop and traceability
     "to_jsonable",
     "enable_audit_log",
@@ -250,4 +263,7 @@ __all__ = [  # noqa: RUF022
     "WEIBULL_BOOTSTRAP_DEFAULT",
     "WEIBULL_CI_CONFIDENCE",
     "WEIBULL_MIN_INTERVALS",
+    "CROW_AMSAA_MIN_FAILURES",
+    "FORECAST_INTERVAL_DEFAULT",
+    "PM_MIN_SAVING_FRACTION",
 ]

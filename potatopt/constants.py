@@ -92,6 +92,16 @@ WEIBULL_BOOTSTRAP_DEFAULT = 500
 # Default two-sided confidence level for the Weibull bootstrap interval.
 WEIBULL_CI_CONFIDENCE = 0.95
 
+# Fewest failures for which the Crow-AMSAA trend is reported at all.
+CROW_AMSAA_MIN_FAILURES = 5
+
+# Default central coverage of the failure-count forecast interval.
+FORECAST_INTERVAL_DEFAULT = 0.80
+
+# A PM interval is only recommended if it cuts the long-run cost rate by at least this fraction
+# versus running to failure. Below it, the recommendation is noise dressed as advice.
+PM_MIN_SAVING_FRACTION = 0.05
+
 # The seed used when the caller does not choose one. A fixed default is right -
 # an unseeded run is not reproducible and cannot be defended in a report - but it
 # was previously hard-coded at every call site, which made the seed invisible and

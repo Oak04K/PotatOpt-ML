@@ -11,6 +11,31 @@ only *what* changed makes the same mistake easy to reintroduce.
 
 ---
 
+## [1.8.0] - 2026-10-01
+
+### Added - planning maintenance from a repair log with no sensors
+
+The plant this library was built for keeps only an Excel repair log, so five
+functions in `reliability.py` plan from that log alone:
+
+- `calculate_crow_amsaa(failure_times, observation_end)` - NHPP trend test:
+  `worsening`, `improving`, or `no_evidence`, with an exact interval on beta. On
+  a constant-rate process it flags at its nominal 5%; the tests require 3-7%
+  over 2,000 replications. Below `CROW_AMSAA_MIN_FAILURES` it abstains.
+- `forecast_failure_count(n_failures, lookback, horizon)` - Poisson forecast of
+  the next horizon's failures, `events / lookback * horizon`, with an interval
+  that covers Poisson noise only.
+- `calculate_optimal_pm_interval(beta, eta, cost_planned, cost_breakdown)` -
+  age-replacement interval, recommended only for wear-out (beta > 1) and only
+  when it saves at least 5% against running to failure.
+- `calculate_weibull_curves` and `calculate_pm_cost_curve` - the reliability,
+  hazard and cost-rate curves behind those answers, for plotting.
+- Constants `CROW_AMSAA_MIN_FAILURES` and `WEIBULL_MIN_INTERVALS`.
+
+Additive only: nothing existing changed. `examples/tour.py` shows all five.
+
+**Why 1.8.0 and not 1.7.2:** new public API is a minor version.
+
 ## [1.7.1] - 2026-09-08
 
 Everything the library did up to here treated a DataFrame as a pile of

@@ -8,11 +8,13 @@
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Core install](https://img.shields.io/badge/core%20install-4%20packages-orange.svg)](#why-it-is-built-this-way)
 
-A machine-learning library for **condition-based and predictive maintenance**.
-Sensor readings from factory equipment go in; a maintenance decision, and what
-that decision is worth in money, come out. CPU only, no GPU. It is meant to be
-driven either by an engineer on the shop floor or by an AI agent, in as few
-lines as possible.
+A Python library for **maintenance analytics**, from whichever data a plant
+actually has. With sensors: drift, SPC and AutoML failure prediction. With only a
+repair-request log: MTBF/MTTR, failure-rate trend (Crow-AMSAA), wear-out
+(Weibull), failure forecasts and PM intervals. A maintenance decision, and what
+that decision is worth, come out. CPU only, no GPU. It is meant to be driven
+either by an engineer on the shop floor or by an AI agent, in as few lines as
+possible.
 
 [อ่านเอกสารฉบับภาษาไทย (ละเอียดกว่า)](README.th.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
 
@@ -68,7 +70,7 @@ minute, and a test fails if the tour ever falls behind the public API.
 | 3 | Is the process stable? | `spc.py` | `calculate_ewma_chart`, `calculate_cusum_chart`, `calculate_control_rules` |
 | 4 | Is it capable? | `quality.py` | `calculate_capability` |
 | 5 | Has it drifted since? | `drift.py` | `check_data_drift`, `check_asset_drift`, `calculate_psi` |
-| 6 | What is it costing me? | `reliability.py` | `calculate_mtbf`, `calculate_mttr`, `calculate_availability`, `calculate_oee`, `calculate_pareto`, `calculate_time_between_failures`, `calculate_weibull` |
+| 6 | What is it costing me? | `reliability.py` | `calculate_mtbf`, `calculate_mttr`, `calculate_availability`, `calculate_oee`, `calculate_pareto`, `calculate_time_between_failures`, `calculate_weibull`, `calculate_crow_amsaa`, `forecast_failure_count`, `calculate_optimal_pm_interval`, `calculate_weibull_curves`, `calculate_pm_cost_curve` |
 | 7 | Are the rows a sequence? | `sequence.py` | `build_failure_labels`, `add_window_features` |
 | 8 | Can a model help? | `engine.py`, `analysis.py`, `calibration.py` | `PotatOptEngine`, `auto_analyze`, `check_calibration`, `run_seed_sweep` |
 
@@ -246,6 +248,20 @@ haz["hazard_pattern"]            # 'wear_out'
 haz["constant_hazard_is_valid"]  # False, with the reason attached
 haz["b10_life"]                  # the hour by which a tenth have failed
 ```
+
+**Planning from the repair log alone** (new in 1.8.0), for a plant with no sensors:
+
+- **Trend** - `calculate_crow_amsaa`: is the failure rate rising or falling? The
+  interval is exact, so on a constant-rate machine it raises a false alarm at its
+  nominal 5% (the tests require 3-7% over 2,000 replications).
+- **Wear-out and PM** - `calculate_weibull` on times between failures, then
+  `calculate_optimal_pm_interval`, which recommends a fixed interval only when
+  wear-out is statistically evident **and** it beats running to failure by at
+  least 5% at the cost ratio given.
+- **Forecast** - `forecast_failure_count`, a Poisson count over a look-back
+  window. Its interval covers Poisson noise only.
+- `calculate_weibull_curves` and `calculate_pm_cost_curve` return the curves
+  behind those answers, for plotting.
 
 Gaps are measured **within** each asset: the time from machine A failing to
 machine B failing is not a time between failures of anything. N failures on one
